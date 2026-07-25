@@ -1049,7 +1049,7 @@ async function javaLenses(doc: vscode.TextDocument): Promise<vscode.CodeLens[]> 
   if (typeRange) {
     lenses.unshift(
       new vscode.CodeLens(typeRange, {
-        title: '-> XML Mapper',
+        title: '-> XML',
         command: 'mapperJumper.jump',
         arguments: ['java2namespace', info.fqn, '', doc.uri.toString()],
       })
@@ -1069,7 +1069,7 @@ function xmlLenses(doc: vscode.TextDocument): vscode.CodeLens[] {
     const line = doc.positionAt(mapper.start).line;
     lenses.push(
       new vscode.CodeLens(new vscode.Range(line, 0, line, 0), {
-        title: '-> Mapper Type',
+        title: 'JAVA',
         command: 'mapperJumper.jump',
         arguments: ['namespace2java', ns, '', doc.uri.toString()],
       })
@@ -1083,7 +1083,7 @@ function xmlLenses(doc: vscode.TextDocument): vscode.CodeLens[] {
     const line = doc.positionAt(tag.start).line;
     lenses.push(
       new vscode.CodeLens(new vscode.Range(line, 0, line, 0), {
-        title: '-> java',
+        title: '-> JAVA',
         command: 'mapperJumper.jump',
         arguments: ['xml2java', ns, id, doc.uri.toString()],
       })
