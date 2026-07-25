@@ -80,6 +80,22 @@ export function activate(context: vscode.ExtensionContext) {
     )
   );
 
+  // Java Mapper 类/接口名 -> XML <mapper namespace>:Go to References(Shift+F12)
+  // 结果与 Java 语言服务的引用合并，补充显示精确及通配 XML 引用
+  context.subscriptions.push(
+    vscode.languages.registerReferenceProvider(
+      { scheme: 'file', language: 'java' },
+      {
+        provideReferences(
+          document: vscode.TextDocument,
+          position: vscode.Position
+        ) {
+          return resolveReferences(document, position);
+        },
+      }
+    )
+  );
+
   // CodeLens 标识点击跳转(命令不暴露命令面板, 仅 CodeLens 内部用)
   context.subscriptions.push(
     vscode.commands.registerCommand('mapperJumper.jump', jump)

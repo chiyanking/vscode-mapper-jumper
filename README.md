@@ -7,6 +7,7 @@ VSCode 插件，用于在 MyBatis Mapper Java 接口与 XML 映射文件之间�
 | 当前符号 | 跳转目标 | 入口 |
 |---|---|---|
 | Java Mapper 类/接口名 | XML `<mapper namespace>` | `-> XML` CodeLens / `Cmd/Ctrl+F12` |
+| Java Mapper 类/接口名 | XML `<mapper namespace>`(作为引用) | `Shift+F12` |
 | Java Mapper 方法 | XML CRUD 语句的 `id` | `-> XML` CodeLens / `Cmd/Ctrl+F12` |
 | XML `<mapper namespace>` | Java Mapper 类/接口 | `-> JAVA` CodeLens / `Ctrl/Cmd+Click` / `F12` |
 | XML CRUD 语句的 `id` | Java Mapper 方法 | `-> JAVA` CodeLens / `Ctrl/Cmd+Click` / `F12` |
@@ -36,7 +37,7 @@ XML 扫描支持单双引号、等号两侧空格、任意属性顺序，以及�
 - 激活后扫描工作区 XML，建立 `namespace -> XML[]` 内存索引，并通过文件监听器增量维护。
 - 同一个 namespace 存在多个 XML 时，优先选择与当前文件相同模块、相同 workspace folder、公共路径最长的候选。
 - XML 到 Java 优先把同模块的 `src/main/resources` 映射为 `src/main/java`，找不到时再搜索工作区。
-- Java 到 XML 通过 namespace 索引定位，因此纯注解 Mapper 不显示 CodeLens。
+- Java 到 XML 通过 namespace 索引定位，因此纯注解 Mapper 不显示 CodeLens。Java Mapper 类型的 References 会在精确 namespace 之外，追加就近的 `namespace="*"` XML。
 - 扫描会排除 `.git`、`.gradle`、`target`、`build`、`out`、`dist` 和 `node_modules`。
 
 源码根兼容标准 Maven 结构 `src/main/java`，以及老式 `src/` 结构。
