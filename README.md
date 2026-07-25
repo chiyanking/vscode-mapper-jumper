@@ -6,12 +6,14 @@ VSCode 插件:在 MyBatis Mapper 接口与 XML 之间双向跳转,精准定位�
 
 | 当前文件 | 跳转到 | 入口 |
 |---|---|---|
+| Java Mapper 类/接口名 | XML `<mapper namespace>` | 类名上方「-> XML Mapper」标识 / `Cmd/Ctrl+F12` |
+| XML `<mapper namespace>` | Java Mapper 类/接口 | 标签上方「-> Mapper Type」标识 / `Ctrl/Cmd+Click` |
 | `XxxMapper.java` | `XxxMapper.xml` | 方法上方「-> XML」标识(点击)/ `Cmd/Ctrl+F12`(Go to Implementation) |
-| `XxxMapper.xml` | `XxxMapper.java` | 语句上方「-> Mapper」标识(点击)/ `Ctrl/Cmd+Click`(Go to Definition) |
+| `XxxMapper.xml` | `XxxMapper.java` | 语句上方「-> java」标识(点击)/ `Ctrl/Cmd+Click`(Go to Definition) |
 | `<sql id="x">` | `<include refid="x">` | 片段上方「-> Include」标识(点击)/ `Shift+F12`(查找引用)/ `Ctrl/Cmd+Click`(Go to Definition) |
 | `<include refid="x">` | `<sql id="x">` | `Ctrl/Cmd+Click`(Go to Definition) |
 
-1. **CodeLens 标识**:打开 `XxxMapper.java`,每个方法上方显示「-> XML」,点击跳到 XML 对应语句;打开 `XxxMapper.xml`,每条语句上方显示「-> Mapper」,点击跳回 Java 方法。
+1. **CodeLens 标识**:打开 `XxxMapper.java`,每个方法上方显示「-> XML」,点击跳到 XML 对应语句;打开 `XxxMapper.xml`,每条语句上方显示「-> java」,点击跳回 Java 方法。
 2. **Go to Implementation**:`XxxMapper.java` 方法上 `Cmd/Ctrl+F12`(或右键「转到实现」)跳 XML。
 3. **Go to Definition**:`XxxMapper.xml` 语句内 `Ctrl/Cmd+Click`(或 `F12`、右键「转到定义」)跳 Java 方法。右键「转到声明」同样可用。
 

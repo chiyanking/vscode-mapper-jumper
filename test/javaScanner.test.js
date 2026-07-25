@@ -1,6 +1,9 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { findJavaMethodNameOffsets } = require('../out/javaScanner');
+const {
+  findJavaMethodNameOffsets,
+  findJavaTypeNameOffset,
+} = require('../out/javaScanner');
 
 test('finds declarations but ignores Javadoc links and method calls', () => {
   const source = `
@@ -28,4 +31,15 @@ interface UserMapper {
   assert.deepEqual(findJavaMethodNameOffsets(source, 'findAll'), [
     source.indexOf('findAll'),
   ]);
+});
+
+test('finds the mapper type declaration and ignores comments', () => {
+  const source = `
+// interface LmsDeliveryMsOutboundOrderReqMapper {}
+public interface LmsDeliveryMsOutboundOrderReqMapper {
+}`;
+  assert.equal(
+    findJavaTypeNameOffset(source, 'LmsDeliveryMsOutboundOrderReqMapper'),
+    source.lastIndexOf('LmsDeliveryMsOutboundOrderReqMapper')
+  );
 });

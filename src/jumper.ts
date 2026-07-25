@@ -1,6 +1,9 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { findJavaMethodNameOffsets } from './javaScanner';
+import {
+  findJavaMethodNameOffsets,
+  findJavaTypeNameOffset,
+} from './javaScanner';
 import {
   XmlAttribute,
   XmlTag,
@@ -135,6 +138,15 @@ function getMapperNamespace(text: string): string | undefined {
     ?.attributes.get('namespace')?.value;
 }
 
+function findMapperNamespaceRange(
+  doc: vscode.TextDocument
+): vscode.Range | undefined {
+  const mapper = scanXmlTags(doc.getText()).find(
+    (tag) => !tag.closing && tag.name === 'mapper'
+  );
+  return rangeForAttribute(doc, mapper, 'namespace');
+}
+
 function findXmlIdRange(
   doc: vscode.TextDocument,
   id: string
@@ -156,7 +168,7 @@ const uriToNs = new Map<string, string>(); // xmlUri.toString() -> namespace(删
 let indexPromise: Promise<void> | undefined;
 
 function isExcluded(uri: vscode.Uri): boolean {
-  return /[\\/](target|node_modules|\.git|build)[\\/]/.test(uri.fsPath);
+  return /[\\/](target|node_modules|\.git|build|out|dist|\.gradle)[\\/]/.test(uri.fsPath);
 }
 
 async function readNamespace(uri: vscode.Uri): Promise<string | undefined> {
@@ -190,7 +202,7 @@ function removeNamespaceEntry(uri: vscode.Uri): void {
 async function buildNamespaceIndex(): Promise<void> {
   const uris = await vscode.workspace.findFiles(
     '**/*.xml',
-    '**/{target,node_modules,.git,build}/**'
+    '**/{target,node_modules,.git,build,out,dist,.gradle}/**'
   );
   for (const uri of uris) {
     if (isExcluded(uri)) continue;
@@ -292,7 +304,7 @@ async function locateJava(
   }
   const found = await vscode.workspace.findFiles(
     '**/' + fqnToPath(targetFqn) + '.java',
-    '**/{target,node_modules,build}/**',
+    '**/{target,node_modules,.git,build,out,dist,.gradle}/**',
     1
   );
   return found.length > 0 ? found[0] : undefined;
@@ -385,21 +397,37 @@ function findResultMapIdRange(
   return findXmlAttributeRange(doc, new Set(['resultMap']), 'id', id);
 }
 
-/** 在 Java 文档中定位 class|interface|enum 类名声明 range */
-function findJavaTypeRange(
+/** 在 Java 文档中定位 class|interface|enum|record 类名声明 range */
+function findJavaTypeRangeByRegex(
   doc: vscode.TextDocument,
   className: string
 ): vscode.Range | undefined {
-  const re = new RegExp(
-    '\\b(class|interface|enum)\\s+' + escapeRegExp(className) + '\\b'
-  );
-  for (let i = 0; i < doc.lineCount; i++) {
-    const m = re.exec(doc.lineAt(i).text);
-    if (m) {
-      return new vscode.Range(i, m.index, i, m.index + m[0].length);
-    }
+  const offset = findJavaTypeNameOffset(doc.getText(), className);
+  return offset === undefined
+    ? undefined
+    : new vscode.Range(
+        doc.positionAt(offset),
+        doc.positionAt(offset + className.length)
+      );
+}
+
+async function findJavaTypeRange(
+  doc: vscode.TextDocument,
+  className: string
+): Promise<vscode.Range | undefined> {
+  try {
+    const symbols = (await vscode.commands.executeCommand(
+      'vscode.executeDocumentSymbolProvider',
+      doc.uri
+    )) as vscode.DocumentSymbol[] | undefined;
+    const types: vscode.DocumentSymbol[] = [];
+    collectTypeSymbols(symbols, types);
+    const symbol = types.find((candidate) => candidate.name === className);
+    if (symbol) return symbol.selectionRange;
+  } catch {
+    // Java 语言服务不可用时使用类型声明正则。
   }
-  return undefined;
+  return findJavaTypeRangeByRegex(doc, className);
 }
 
 // ============================================================
@@ -442,6 +470,10 @@ async function resolveFromXml(
   if (!at) return [];
   const { tag, attr, value } = at;
 
+  // <mapper namespace="FQN"> -> Java Mapper 类/接口
+  if (tag === 'mapper' && attr === 'namespace') {
+    return resolveJavaType(doc.uri.fsPath, value);
+  }
   // select|insert|update|delete 的 id -> mapper 方法
   if (attr === 'id' && /^(select|insert|update|delete)$/.test(tag)) {
     return resolveXmlIdToJava(doc, value);
@@ -539,7 +571,8 @@ async function resolveJavaType(
   const javaDoc = await vscode.workspace.openTextDocument(javaUri);
   const className = value.slice(value.lastIndexOf('.') + 1);
   const range =
-    findJavaTypeRange(javaDoc, className) || new vscode.Range(0, 0, 0, 0);
+    (await findJavaTypeRange(javaDoc, className)) ||
+    new vscode.Range(0, 0, 0, 0);
   return [new vscode.Location(javaUri, range)];
 }
 
@@ -898,6 +931,15 @@ async function resolveFromJava(
   const xmlUri = await findXmlByNamespace(info.fqn, doc.uri.fsPath);
   if (!xmlUri) return [];
 
+  const typeRange = await findJavaTypeRange(doc, info.className);
+  if (typeRange?.contains(pos)) {
+    const xmlDoc = await vscode.workspace.openTextDocument(xmlUri);
+    const namespaceRange = findMapperNamespaceRange(xmlDoc);
+    return namespaceRange
+      ? [new vscode.Location(xmlUri, namespaceRange)]
+      : [];
+  }
+
   const method = await getJavaMethodName(doc, pos);
   if (!method) return [];
   const cleanName = method.split('(')[0].trim();
@@ -962,6 +1004,24 @@ function collectMethodSymbols(
   }
 }
 
+function collectTypeSymbols(
+  symbols: vscode.DocumentSymbol[] | undefined,
+  out: vscode.DocumentSymbol[]
+): void {
+  if (!symbols) return;
+  for (const symbol of symbols) {
+    if (
+      symbol.kind === vscode.SymbolKind.Class ||
+      symbol.kind === vscode.SymbolKind.Interface ||
+      symbol.kind === vscode.SymbolKind.Enum ||
+      symbol.kind === vscode.SymbolKind.Struct
+    ) {
+      out.push(symbol);
+    }
+    collectTypeSymbols(symbol.children, out);
+  }
+}
+
 export async function provideCodeLenses(
   doc: vscode.TextDocument
 ): Promise<vscode.CodeLens[]> {
@@ -977,7 +1037,7 @@ async function javaLenses(doc: vscode.TextDocument): Promise<vscode.CodeLens[]> 
   const xmlUri = await findXmlByNamespace(info.fqn, doc.uri.fsPath);
   if (!xmlUri) return [];
   const methods = await collectJavaMethods(doc);
-  return methods.map(
+  const lenses = methods.map(
     (m) =>
       new vscode.CodeLens(m.range, {
         title: '-> XML',
@@ -985,6 +1045,17 @@ async function javaLenses(doc: vscode.TextDocument): Promise<vscode.CodeLens[]> 
         arguments: ['java2xml', info.fqn, m.name, doc.uri.toString()],
       })
   );
+  const typeRange = await findJavaTypeRange(doc, info.className);
+  if (typeRange) {
+    lenses.unshift(
+      new vscode.CodeLens(typeRange, {
+        title: '-> XML Mapper',
+        command: 'mapperJumper.jump',
+        arguments: ['java2namespace', info.fqn, '', doc.uri.toString()],
+      })
+    );
+  }
+  return lenses;
 }
 
 function xmlLenses(doc: vscode.TextDocument): vscode.CodeLens[] {
@@ -993,6 +1064,17 @@ function xmlLenses(doc: vscode.TextDocument): vscode.CodeLens[] {
   if (!ns) return [];
   const lenses: vscode.CodeLens[] = [];
   const tags = scanXmlTags(text);
+  const mapper = tags.find((tag) => !tag.closing && tag.name === 'mapper');
+  if (mapper) {
+    const line = doc.positionAt(mapper.start).line;
+    lenses.push(
+      new vscode.CodeLens(new vscode.Range(line, 0, line, 0), {
+        title: '-> Mapper Type',
+        command: 'mapperJumper.jump',
+        arguments: ['namespace2java', ns, '', doc.uri.toString()],
+      })
+    );
+  }
   for (const tag of tags) {
     const id = tag.attributes.get('id')?.value;
     if (tag.closing || !id || !/^(select|insert|update|delete)$/.test(tag.name)) {
@@ -1001,7 +1083,7 @@ function xmlLenses(doc: vscode.TextDocument): vscode.CodeLens[] {
     const line = doc.positionAt(tag.start).line;
     lenses.push(
       new vscode.CodeLens(new vscode.Range(line, 0, line, 0), {
-        title: '-> Mapper',
+        title: '-> java',
         command: 'mapperJumper.jump',
         arguments: ['xml2java', ns, id, doc.uri.toString()],
       })
@@ -1052,6 +1134,42 @@ export async function jump(
         ? xmlDoc
         : await vscode.workspace.openTextDocument(first.uri);
     await revealInEditor(targetDoc, first.range);
+    return;
+  }
+
+  if (direction === 'namespace2java') {
+    if (!xmlUriStr) return;
+    const xmlUri = vscode.Uri.parse(xmlUriStr);
+    const javaUri = await locateJavaByXml(xmlUri.fsPath, fqn);
+    if (!javaUri) {
+      vscode.window.showWarningMessage(`未找到 ${fqn}`);
+      return;
+    }
+    const javaDoc = await vscode.workspace.openTextDocument(javaUri);
+    const className = fqn.slice(fqn.lastIndexOf('.') + 1);
+    const range = await findJavaTypeRange(javaDoc, className);
+    if (!range) {
+      vscode.window.showWarningMessage(`在 Java 文件中未找到类型 ${className}`);
+      return;
+    }
+    await revealInEditor(javaDoc, range);
+    return;
+  }
+
+  if (direction === 'java2namespace') {
+    const currentPath = xmlUriStr ? vscode.Uri.parse(xmlUriStr).fsPath : undefined;
+    const xmlUri = await findXmlByNamespace(fqn, currentPath);
+    if (!xmlUri) {
+      vscode.window.showWarningMessage(`未找到 namespace=${fqn} 的 XML`);
+      return;
+    }
+    const xmlDoc = await vscode.workspace.openTextDocument(xmlUri);
+    const range = findMapperNamespaceRange(xmlDoc);
+    if (!range) {
+      vscode.window.showWarningMessage(`XML 中未找到 namespace=${fqn}`);
+      return;
+    }
+    await revealInEditor(xmlDoc, range);
     return;
   }
 

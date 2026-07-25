@@ -72,3 +72,15 @@ export function findJavaMethodNameOffsets(
   }
   return offsets;
 }
+
+export function findJavaTypeNameOffset(
+  source: string,
+  typeName: string
+): number | undefined {
+  const text = maskCommentsAndStrings(source);
+  const re = new RegExp(
+    '\\b(?:class|interface|enum|record)\\s+(' + escapeRegExp(typeName) + ')\\b'
+  );
+  const match = re.exec(text);
+  return match ? match.index + match[0].lastIndexOf(match[1]) : undefined;
+}
