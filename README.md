@@ -1,46 +1,66 @@
 # Mapper Jumper
 
-VSCode 插件:在 MyBatis Mapper 接口与 XML 之间双向跳转,精准定位到对端方法。提供三种入口,均复用同一套定位逻辑,不自定义任何快捷键。
+VSCode 插件，用于在 MyBatis Mapper Java 接口与 XML 映射文件之间双向跳转。关联以 `<mapper namespace>` 为准，不依赖 `Mapper`、`Dao` 等类名后缀，也不注册自定义快捷键。
 
-## 三种入口
+## 跳转入口
 
-| 当前文件 | 跳转到 | 入口 |
+| 当前符号 | 跳转目标 | 入口 |
 |---|---|---|
-| Java Mapper 类/接口名 | XML `<mapper namespace>` | 类名上方「-> XML」标识 / `Cmd/Ctrl+F12` |
-| XML `<mapper namespace>` | Java Mapper 类/接口 | 标签上方「-> JAVA」标识 / `Ctrl/Cmd+Click` |
-| `XxxMapper.java` | `XxxMapper.xml` | 方法上方「-> XML」标识(点击)/ `Cmd/Ctrl+F12`(Go to Implementation) |
-| `XxxMapper.xml` | `XxxMapper.java` | 语句上方「-> JAVA」标识(点击)/ `Ctrl/Cmd+Click`(Go to Definition) |
-| `<sql id="x">` | `<include refid="x">` | 片段上方「-> Include」标识(点击)/ `Shift+F12`(查找引用)/ `Ctrl/Cmd+Click`(Go to Definition) |
-| `<include refid="x">` | `<sql id="x">` | `Ctrl/Cmd+Click`(Go to Definition) |
+| Java Mapper 类/接口名 | XML `<mapper namespace>` | `-> XML` CodeLens / `Cmd/Ctrl+F12` |
+| Java Mapper 方法 | XML CRUD 语句的 `id` | `-> XML` CodeLens / `Cmd/Ctrl+F12` |
+| XML `<mapper namespace>` | Java Mapper 类/接口 | `-> JAVA` CodeLens / `Ctrl/Cmd+Click` / `F12` |
+| XML CRUD 语句的 `id` | Java Mapper 方法 | `-> JAVA` CodeLens / `Ctrl/Cmd+Click` / `F12` |
+| XML `<sql id="x">` | 所有 `<include>` 用法 | `-> Include` CodeLens / `Shift+F12` / `Ctrl/Cmd+Click` |
+| XML `<include refid="x">` | `<sql id="x">` | `Ctrl/Cmd+Click` / `F12` |
 
-1. **CodeLens 标识**:打开 `XxxMapper.java`,每个方法和类名上方显示「-> XML」,点击跳到 XML 对应位置;打开 `XxxMapper.xml`,每条语句上方显示「-> JAVA」,点击跳回 Java 方法。
-2. **Go to Implementation**:`XxxMapper.java` 方法上 `Cmd/Ctrl+F12`(或右键「转到实现」)跳 XML。
-3. **Go to Definition**:`XxxMapper.xml` 语句内 `Ctrl/Cmd+Click`(或 `F12`、右键「转到定义」)跳 Java 方法。右键「转到声明」同样可用。
+CodeLens 需要开启 VSCode 的 `editor.codeLens` 设置，该设置默认开启。
 
-CodeLens 标识即 VSCode 的 CodeLens,需 `editor.codeLens` 开启(默认开)。
+## XML 跳转支持
 
-## 关联策略
+| XML 属性 | 跳转目标 |
+|---|---|
+| `<mapper namespace>` | Java 类或接口声明 |
+| `<select/insert/update/delete id>` | Mapper 方法声明 |
+| `<sql id>` | `<include refid>` 用法 |
+| `refid` | `<sql id>` 定义，支持 `namespace.id` |
+| `resultMap` | `<resultMap id>` 定义，支持跨 namespace |
+| `select` | 对应 `<select id>` 定义 |
+| `resultType`、`parameterType`、`type`、`javaType`、`ofType` | Java 全限定类型声明 |
+| `property` | 当前 `resultMap`、`association` 或 `collection` 对应 Java 类型的字段 |
+| `test` | 当前 CRUD 语句对应 Mapper 方法的 Java 参数 |
 
-以 MyBatis 的 `namespace`(= Java 全限定名)为关联键:
+XML 扫描支持单双引号、等号两侧空格、任意属性顺序，以及属性值中的 `>`。注释、CDATA、处理指令和 DOCTYPE 中的伪标签不会参与跳转。
 
-- 激活时扫描工作区所有 XML,建立 `namespace -> XML` 索引(内存 <1MB),并用文件监听器增量维护。
-- Java 是否支持跳 XML = 其全限定名是否在索引中。有对应 XML 才显示标识/提供跳转(纯注解 Mapper 不显示),覆盖 `Mapper`/`Dao`/任意命名。
-- XML -> Java:从 XML 路径找最近的 `src/main/resources`,替换为 `src/main/java`,拼接 `namespace` 路径(模块就近)。
-- Java -> XML:直接查索引(`namespace` 全局唯一)。
+## 关联与索引
 
-源码根兼容标准 Maven(`src/main/java`)与老式结构(`src/`)。
+- 激活后扫描工作区 XML，建立 `namespace -> XML[]` 内存索引，并通过文件监听器增量维护。
+- 同一个 namespace 存在多个 XML 时，优先选择与当前文件相同模块、相同 workspace folder、公共路径最长的候选。
+- XML 到 Java 优先把同模块的 `src/main/resources` 映射为 `src/main/java`，找不到时再搜索工作区。
+- Java 到 XML 通过 namespace 索引定位，因此纯注解 Mapper 不显示 CodeLens。
+- 扫描会排除 `.git`、`.gradle`、`target`、`build`、`out`、`dist` 和 `node_modules`。
+
+源码根兼容标准 Maven 结构 `src/main/java`，以及老式 `src/` 结构。
+
+## 限制
+
+- 不处理 `@Select`、`@Insert` 等注解 SQL。
+- Java 类型跳转要求 XML 中使用全限定类名；`map`、`string`、项目自定义 typeAlias 等别名不会跳转。
+- `test` 表达式按 Java 源码参数名定位，暂不解析名称不同的 `@Param` 别名。
+- Java 方法和类型定位优先使用 Java 语言服务的 DocumentSymbol；语言服务不可用时使用内置降级解析。
+- 跨文件 `<include>` 仅匹配带 namespace 前缀的 `refid="namespace.id"`；短 `refid="id"` 只在当前 XML 内匹配。
 
 ## 开发
 
 ```bash
 npm install
-npm run compile      # 或 npm run watch
+npm run compile
+npm test
 ```
 
-在 VSCode 中按 `F5` 启动扩展开发宿主调试。
+使用 `npm run watch` 持续编译，或在 VSCode 中按 `F5` 启动扩展开发宿主。
 
-## 说明
+打包 VSIX：
 
-- 不处理 `@Select` 等注解 SQL(它们不在 XML 中)。
-- 方法名解析优先调用 Java 语言服务的 DocumentSymbol(需 Red Hat Java 扩展),失败时回退到正则。
-- `<sql id="x">` 片段支持双向跳转:`<include refid="x">` -> 定义,`<sql id="x">` -> 所有用法。跨文件引用以 `namespace.id` 前缀形式匹配(短形式仅同文件内生效)。
+```bash
+npx @vscode/vsce package
+```
