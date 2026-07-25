@@ -1,0 +1,32 @@
+{
+  "name": "mapper-jumper",
+  "displayName": "Mapper Jumper",
+  "description": "MyBatis Mapper <-> XML 双向跳转(namespace 索引驱动, 支持 Mapper/Dao 等任意命名)",
+  "version": "0.0.13",
+  "publisher": "mapper-jumper",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/chiyanking/vscode-mapper-jumper.git"
+  },
+  "engines": {
+    "vscode": "^1.70.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onLanguage:java",
+    "onLanguage:xml"
+  ],
+  "main": "./out/extension.js",
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^18.0.0",
+    "@types/vscode": "^1.70.0",
+    "typescript": "^5.0.0"
+  }
+}
