@@ -1,5 +1,14 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
+import { findJavaMethodNameOffsets } from './javaScanner';
+import {
+  XmlAttribute,
+  XmlTag,
+  findOpenTagAtOffset,
+  findTagById,
+  getOpenTagStack,
+  scanXmlTags,
+} from './xmlScanner';
 
 // ============================================================
 // 工具函数
@@ -59,48 +68,90 @@ async function readText(uri: vscode.Uri): Promise<string> {
 // 目标位置定位
 // ============================================================
 
-function findJavaMethodRange(
+function findJavaMethodRangesByRegex(
   doc: vscode.TextDocument,
   methodName: string
-): vscode.Range | undefined {
-  const re = new RegExp('\\b' + escapeRegExp(methodName) + '\\s*\\(');
-  for (let i = 0; i < doc.lineCount; i++) {
-    const text = doc.lineAt(i).text;
-    const m = re.exec(text);
-    if (m) {
-      return new vscode.Range(i, m.index, i, m.index + methodName.length);
-    }
+): vscode.Range[] {
+  return findJavaMethodNameOffsets(doc.getText(), methodName).map((offset) =>
+    new vscode.Range(
+      doc.positionAt(offset),
+      doc.positionAt(offset + methodName.length)
+    )
+  );
+}
+
+async function findJavaMethodRanges(
+  doc: vscode.TextDocument,
+  methodName: string
+): Promise<vscode.Range[]> {
+  try {
+    const symbols = (await vscode.commands.executeCommand(
+      'vscode.executeDocumentSymbolProvider',
+      doc.uri
+    )) as vscode.DocumentSymbol[] | undefined;
+    const methods: vscode.DocumentSymbol[] = [];
+    collectMethodSymbols(symbols, methods);
+    const matches = methods.filter(
+      (symbol) => symbol.name.split('(')[0].trim() === methodName
+    );
+    if (matches.length > 0) return matches.map((symbol) => symbol.selectionRange);
+  } catch {
+    // Java 语言服务不可用时使用保守的声明正则。
   }
-  return undefined;
+  return findJavaMethodRangesByRegex(doc, methodName);
+}
+
+function rangeForAttribute(
+  doc: vscode.TextDocument,
+  tag: XmlTag | undefined,
+  name: string
+): vscode.Range | undefined {
+  const attr = tag?.attributes.get(name);
+  if (!attr) return undefined;
+  return new vscode.Range(
+    doc.positionAt(attr.valueStart),
+    doc.positionAt(attr.valueEnd)
+  );
+}
+
+function findXmlAttributeRange(
+  doc: vscode.TextDocument,
+  tagNames: ReadonlySet<string>,
+  attrName: string,
+  value: string
+): vscode.Range | undefined {
+  const tag = scanXmlTags(doc.getText()).find(
+    (candidate) =>
+      !candidate.closing &&
+      tagNames.has(candidate.name) &&
+      candidate.attributes.get(attrName)?.value === value
+  );
+  return rangeForAttribute(doc, tag, attrName);
+}
+
+function getMapperNamespace(text: string): string | undefined {
+  return scanXmlTags(text)
+    .find((tag) => !tag.closing && tag.name === 'mapper')
+    ?.attributes.get('namespace')?.value;
 }
 
 function findXmlIdRange(
   doc: vscode.TextDocument,
   id: string
 ): vscode.Range | undefined {
-  const re = new RegExp(
-    '<(?:select|insert|update|delete)\\b[^>]*?\\bid="' + escapeRegExp(id) + '"',
-    'g'
+  return findXmlAttributeRange(
+    doc,
+    new Set(['select', 'insert', 'update', 'delete']),
+    'id',
+    id
   );
-  const text = doc.getText();
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(text)) !== null) {
-    const idIdx = text.indexOf('id="' + id + '"', m.index);
-    if (idIdx >= 0) {
-      const valueStart = idIdx + 'id="'.length;
-      const start = doc.positionAt(valueStart);
-      const end = doc.positionAt(valueStart + id.length);
-      return new vscode.Range(start, end);
-    }
-  }
-  return undefined;
 }
 
 // ============================================================
-// namespace 索引(方案 A 核心: namespace(FQN) -> xmlUri)
+// namespace 索引(namespace(FQN) -> 模块内所有 xmlUri)
 // ============================================================
 
-const nsIndex = new Map<string, vscode.Uri>(); // namespace -> xmlUri
+const nsIndex = new Map<string, Map<string, vscode.Uri>>();
 const uriToNs = new Map<string, string>(); // xmlUri.toString() -> namespace(删除时反查)
 let indexPromise: Promise<void> | undefined;
 
@@ -110,11 +161,30 @@ function isExcluded(uri: vscode.Uri): boolean {
 
 async function readNamespace(uri: vscode.Uri): Promise<string | undefined> {
   try {
-    const m = (await readText(uri)).match(/<mapper\s+namespace="([^"]+)"/);
-    return m ? m[1] : undefined;
+    return getMapperNamespace(await readText(uri));
   } catch {
     return undefined;
   }
+}
+
+function addNamespaceEntry(namespace: string, uri: vscode.Uri): void {
+  let entries = nsIndex.get(namespace);
+  if (!entries) {
+    entries = new Map<string, vscode.Uri>();
+    nsIndex.set(namespace, entries);
+  }
+  entries.set(uri.toString(), uri);
+  uriToNs.set(uri.toString(), namespace);
+}
+
+function removeNamespaceEntry(uri: vscode.Uri): void {
+  const key = uri.toString();
+  const namespace = uriToNs.get(key);
+  if (!namespace) return;
+  const entries = nsIndex.get(namespace);
+  entries?.delete(key);
+  if (entries?.size === 0) nsIndex.delete(namespace);
+  uriToNs.delete(key);
 }
 
 async function buildNamespaceIndex(): Promise<void> {
@@ -125,10 +195,7 @@ async function buildNamespaceIndex(): Promise<void> {
   for (const uri of uris) {
     if (isExcluded(uri)) continue;
     const ns = await readNamespace(uri);
-    if (ns) {
-      nsIndex.set(ns, uri);
-      uriToNs.set(uri.toString(), ns);
-    }
+    if (ns) addNamespaceEntry(ns, uri);
   }
 }
 
@@ -141,29 +208,61 @@ export function ensureIndex(): Promise<void> {
 /** 单个 XML 新增/修改时增量更新 */
 export async function refreshXmlFile(uri: vscode.Uri): Promise<void> {
   if (isExcluded(uri)) return;
-  const oldNs = uriToNs.get(uri.toString());
-  if (oldNs) nsIndex.delete(oldNs);
+  removeNamespaceEntry(uri);
   const ns = await readNamespace(uri);
-  if (ns) {
-    nsIndex.set(ns, uri);
-    uriToNs.set(uri.toString(), ns);
-  } else {
-    uriToNs.delete(uri.toString());
-  }
+  if (ns) addNamespaceEntry(ns, uri);
 }
 
 /** 单个 XML 删除时清理 */
 export function removeXmlFile(uri: vscode.Uri): void {
-  const oldNs = uriToNs.get(uri.toString());
-  if (oldNs) nsIndex.delete(oldNs);
-  uriToNs.delete(uri.toString());
+  removeNamespaceEntry(uri);
+}
+
+function moduleRoot(filePath: string): string | undefined {
+  const norm = normalize(filePath);
+  const src = norm.lastIndexOf('/src/');
+  return src >= 0 ? norm.slice(0, src) : undefined;
+}
+
+function commonPrefixLength(left: string, right: string): number {
+  const max = Math.min(left.length, right.length);
+  let i = 0;
+  while (i < max && left[i] === right[i]) i++;
+  return i;
+}
+
+function rankNamespaceCandidate(uri: vscode.Uri, currentPath?: string): number {
+  if (!currentPath) return 0;
+  const current = normalize(currentPath);
+  const candidate = normalize(uri.fsPath);
+  let score = commonPrefixLength(current, candidate);
+  const currentModule = moduleRoot(current);
+  if (currentModule && currentModule === moduleRoot(candidate)) score += 100_000;
+  const workspace = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(current));
+  const candidateWorkspace = vscode.workspace.getWorkspaceFolder(uri);
+  if (
+    workspace &&
+    candidateWorkspace &&
+    workspace.uri.toString() === candidateWorkspace.uri.toString()
+  ) {
+    score += 10_000;
+  }
+  return score;
 }
 
 async function findXmlByNamespace(
-  namespace: string
+  namespace: string,
+  currentPath?: string
 ): Promise<vscode.Uri | undefined> {
   await ensureIndex();
-  return nsIndex.get(namespace);
+  const candidates = [...(nsIndex.get(namespace)?.values() || [])];
+  candidates.sort(
+    (left, right) =>
+      rankNamespaceCandidate(right, currentPath) -
+        rankNamespaceCandidate(left, currentPath) ||
+      left.fsPath.localeCompare(right.fsPath)
+  );
+  return candidates[0];
 }
 
 // ============================================================
@@ -268,27 +367,11 @@ function getXmlAttributeAtCursor(
 ): { tag: string; attr: string; value: string } | undefined {
   const text = doc.getText();
   const cursor = doc.offsetAt(pos);
-  const tagStartRe = /<([a-zA-Z][\w-]*)\b/g;
-  let lastStart = -1;
-  let lastTag = '';
-  let m: RegExpExecArray | null;
-  while ((m = tagStartRe.exec(text)) !== null) {
-    if (m.index > cursor) break;
-    lastStart = m.index;
-    lastTag = m[1];
-  }
-  if (lastStart < 0) return undefined;
-  const closeIdx = text.indexOf('>', lastStart);
-  if (closeIdx < 0) return undefined;
-  if (cursor < lastStart || cursor > closeIdx) return undefined;
-  const tagText = text.slice(lastStart, closeIdx + 1);
-  const attrRe = /\b([a-zA-Z][\w-]*)\s*=\s*"([^"]*)"/g;
-  let am: RegExpExecArray | null;
-  while ((am = attrRe.exec(tagText)) !== null) {
-    const valueStart = lastStart + am.index + am[0].indexOf(am[2]);
-    const valueEnd = valueStart + am[2].length;
-    if (cursor >= valueStart && cursor <= valueEnd) {
-      return { tag: lastTag, attr: am[1], value: am[2] };
+  const tag = findOpenTagAtOffset(scanXmlTags(text), cursor);
+  if (!tag) return undefined;
+  for (const attr of tag.attributes.values()) {
+    if (cursor >= attr.valueStart && cursor <= attr.valueEnd) {
+      return { tag: tag.name, attr: attr.name, value: attr.value };
     }
   }
   return undefined;
@@ -299,20 +382,7 @@ function findResultMapIdRange(
   doc: vscode.TextDocument,
   id: string
 ): vscode.Range | undefined {
-  const re = new RegExp('<resultMap\\b[^>]*?\\bid="' + escapeRegExp(id) + '"', 'g');
-  const text = doc.getText();
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(text)) !== null) {
-    const idIdx = text.indexOf('id="' + id + '"', m.index);
-    if (idIdx >= 0) {
-      const valueStart = idIdx + 'id="'.length;
-      return new vscode.Range(
-        doc.positionAt(valueStart),
-        doc.positionAt(valueStart + id.length)
-      );
-    }
-  }
-  return undefined;
+  return findXmlAttributeRange(doc, new Set(['resultMap']), 'id', id);
 }
 
 /** 在 Java 文档中定位 class|interface|enum 类名声明 range */
@@ -358,8 +428,7 @@ export async function resolveReferences(
   const at = getXmlAttributeAtCursor(document, position);
   if (!at) return [];
   if (at.tag === 'sql' && at.attr === 'id') {
-    const nsM = document.getText().match(/<mapper\s+namespace="([^"]+)"/);
-    const ns = nsM ? nsM[1] : '';
+    const ns = getMapperNamespace(document.getText()) || '';
     return findIncludeUsages(document, ns, at.value);
   }
   return [];
@@ -390,6 +459,7 @@ async function resolveFromXml(
     attr === 'resultType' ||
     attr === 'parameterType' ||
     attr === 'type' ||
+    attr === 'javaType' ||
     attr === 'ofType'
   ) {
     return resolveJavaType(doc.uri.fsPath, value);
@@ -417,14 +487,13 @@ async function resolveXmlIdToJava(
   doc: vscode.TextDocument,
   id: string
 ): Promise<vscode.Location[]> {
-  const nsM = doc.getText().match(/<mapper\s+namespace="([^"]+)"/);
-  if (!nsM) return [];
-  const javaUri = await locateJavaByXml(doc.uri.fsPath, nsM[1]);
+  const namespace = getMapperNamespace(doc.getText());
+  if (!namespace) return [];
+  const javaUri = await locateJavaByXml(doc.uri.fsPath, namespace);
   if (!javaUri) return [];
   const javaDoc = await vscode.workspace.openTextDocument(javaUri);
-  const range = findJavaMethodRange(javaDoc, id);
-  if (!range) return [];
-  return [new vscode.Location(javaUri, range)];
+  const ranges = await findJavaMethodRanges(javaDoc, id);
+  return ranges.map((range) => new vscode.Location(javaUri, range));
 }
 
 async function locateJavaByXml(
@@ -449,7 +518,7 @@ async function resolveResultMapRef(
     const lastDot = value.lastIndexOf('.');
     const ns = value.slice(0, lastDot);
     const rid = value.slice(lastDot + 1);
-    const xmlUri = await findXmlByNamespace(ns);
+    const xmlUri = await findXmlByNamespace(ns, doc.uri.fsPath);
     if (xmlUri) {
       const xmlDoc = await vscode.workspace.openTextDocument(xmlUri);
       const r = findResultMapIdRange(xmlDoc, rid);
@@ -484,7 +553,7 @@ async function resolveSelectRef(
     const lastDot = value.lastIndexOf('.');
     const ns = value.slice(0, lastDot);
     const sid = value.slice(lastDot + 1);
-    const xmlUri = await findXmlByNamespace(ns);
+    const xmlUri = await findXmlByNamespace(ns, doc.uri.fsPath);
     if (xmlUri) {
       const xmlDoc = await vscode.workspace.openTextDocument(xmlUri);
       const r = findXmlIdRange(xmlDoc, sid);
@@ -504,7 +573,7 @@ async function resolveSqlRef(
     const lastDot = value.lastIndexOf('.');
     const ns = value.slice(0, lastDot);
     const sid = value.slice(lastDot + 1);
-    const xmlUri = await findXmlByNamespace(ns);
+    const xmlUri = await findXmlByNamespace(ns, doc.uri.fsPath);
     if (xmlUri) {
       const xmlDoc = await vscode.workspace.openTextDocument(xmlUri);
       const r = findSqlIdRange(xmlDoc, sid);
@@ -519,20 +588,7 @@ function findSqlIdRange(
   doc: vscode.TextDocument,
   id: string
 ): vscode.Range | undefined {
-  const re = new RegExp('<sql\\b[^>]*?\\bid="' + escapeRegExp(id) + '"', 'g');
-  const text = doc.getText();
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(text)) !== null) {
-    const idIdx = text.indexOf('id="' + id + '"', m.index);
-    if (idIdx >= 0) {
-      const valueStart = idIdx + 'id="'.length;
-      return new vscode.Range(
-        doc.positionAt(valueStart),
-        doc.positionAt(valueStart + id.length)
-      );
-    }
-  }
-  return undefined;
+  return findXmlAttributeRange(doc, new Set(['sql']), 'id', id);
 }
 
 /** <include refid="id"> 的 refid 值 range 列表(同文件, 基于 doc.positionAt) */
@@ -540,26 +596,15 @@ function findIncludeRefRanges(
   doc: vscode.TextDocument,
   id: string
 ): vscode.Range[] {
-  const text = doc.getText();
-  const ranges: vscode.Range[] = [];
-  const re = new RegExp(
-    '<include\\b[^>]*?\\brefid="' + escapeRegExp(id) + '"',
-    'g'
-  );
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(text)) !== null) {
-    const idIdx = text.indexOf('refid="' + id + '"', m.index);
-    if (idIdx >= 0) {
-      const valueStart = idIdx + 'refid="'.length;
-      ranges.push(
-        new vscode.Range(
-          doc.positionAt(valueStart),
-          doc.positionAt(valueStart + id.length)
-        )
-      );
-    }
-  }
-  return ranges;
+  return scanXmlTags(doc.getText())
+    .filter(
+      (tag) =>
+        !tag.closing &&
+        tag.name === 'include' &&
+        tag.attributes.get('refid')?.value === id
+    )
+    .map((tag) => rangeForAttribute(doc, tag, 'refid'))
+    .filter((range): range is vscode.Range => Boolean(range));
 }
 
 /** 原始文本 offset -> Position(兼容 \r\n / \r / \n 行结束符) */
@@ -585,25 +630,22 @@ function findIncludeRefRangesInText(
   text: string,
   id: string
 ): vscode.Range[] {
-  const ranges: vscode.Range[] = [];
-  const re = new RegExp(
-    '<include\\b[^>]*?\\brefid="' + escapeRegExp(id) + '"',
-    'g'
-  );
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(text)) !== null) {
-    const idIdx = text.indexOf('refid="' + id + '"', m.index);
-    if (idIdx >= 0) {
-      const valueStart = idIdx + 'refid="'.length;
-      ranges.push(
+  return scanXmlTags(text)
+    .filter(
+      (tag) =>
+        !tag.closing &&
+        tag.name === 'include' &&
+        tag.attributes.get('refid')?.value === id
+    )
+    .map((tag) => tag.attributes.get('refid'))
+    .filter((attr): attr is XmlAttribute => Boolean(attr))
+    .map(
+      (attr) =>
         new vscode.Range(
-          offsetToPosition(text, valueStart),
-          offsetToPosition(text, valueStart + id.length)
+          offsetToPosition(text, attr.valueStart),
+          offsetToPosition(text, attr.valueEnd)
         )
-      );
-    }
-  }
-  return ranges;
+    );
 }
 
 async function readTextSafe(uri: vscode.Uri): Promise<string | undefined> {
@@ -638,8 +680,10 @@ async function findIncludeUsages(
   // 跨文件: 仅前缀形式 refid="namespace.id"
   await ensureIndex();
   const others: vscode.Uri[] = [];
-  for (const u of nsIndex.values()) {
-    if (u.toString() !== xmlDoc.uri.toString()) others.push(u);
+  for (const entries of nsIndex.values()) {
+    for (const uri of entries.values()) {
+      if (uri.toString() !== xmlDoc.uri.toString()) others.push(uri);
+    }
   }
   const texts = await Promise.all(
     others.map(async (u) => ({ uri: u, text: await readTextSafe(u) }))
@@ -657,8 +701,7 @@ async function resolveSqlIdToIncludes(
   doc: vscode.TextDocument,
   id: string
 ): Promise<vscode.Location[]> {
-  const nsM = doc.getText().match(/<mapper\s+namespace="([^"]+)"/);
-  const ns = nsM ? nsM[1] : '';
+  const ns = getMapperNamespace(doc.getText()) || '';
   return findIncludeUsages(doc, ns, id);
 }
 
@@ -669,14 +712,11 @@ function findEnclosingStatementId(
 ): string | undefined {
   const text = doc.getText();
   const cursor = doc.offsetAt(pos);
-  const re = /<(select|insert|update|delete)\b[^>]*?\bid="([^"]+)"/g;
-  let last: string | undefined;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(text)) !== null) {
-    if (m.index > cursor) break;
-    last = m[2];
-  }
-  return last;
+  const statementNames = new Set(['select', 'insert', 'update', 'delete']);
+  return getOpenTagStack(scanXmlTags(text), cursor)
+    .reverse()
+    .find((tag) => statementNames.has(tag.name))
+    ?.attributes.get('id')?.value;
 }
 
 /** 在 Java 文档中定位字段声明 range(匹配 fieldName; 或 fieldName =) */
@@ -696,28 +736,52 @@ function findJavaFieldRange(
 }
 
 /** 在 Java 文档中定位方法 methodName 的参数 paramName 声明 range(排除 @Param("...") 里的同名值) */
-function findJavaMethodParamRange(
+function findClosingParen(text: string, open: number): number {
+  let depth = 0;
+  let quote: string | undefined;
+  for (let i = open; i < text.length; i++) {
+    const ch = text[i];
+    if (quote) {
+      if (ch === '\\') i++;
+      else if (ch === quote) quote = undefined;
+    } else if (ch === '"' || ch === "'") {
+      quote = ch;
+    } else if (ch === '(') {
+      depth++;
+    } else if (ch === ')' && --depth === 0) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+async function findJavaMethodParamRange(
   doc: vscode.TextDocument,
   methodName: string,
   paramName: string
-): vscode.Range | undefined {
+): Promise<vscode.Range | undefined> {
   const text = doc.getText();
-  const methodRe = new RegExp('\\b' + escapeRegExp(methodName) + '\\s*\\(');
-  const mm = methodRe.exec(text);
-  if (!mm) return undefined;
-  const start = mm.index;
-  const end = text.indexOf(';', start);
-  if (end < 0) return undefined;
-  const sig = text.slice(start, end);
-  const paramRe = new RegExp('[\\s,]' + escapeRegExp(paramName) + '\\s*[,)]');
-  const pm = paramRe.exec(sig);
-  if (!pm) return undefined;
-  const absIdx = start + pm.index + 1;
-  const startPos = doc.positionAt(absIdx);
-  return new vscode.Range(
-    startPos,
-    new vscode.Position(startPos.line, startPos.character + paramName.length)
-  );
+  const methodRanges = await findJavaMethodRanges(doc, methodName);
+  for (const methodRange of methodRanges) {
+    const methodEnd = doc.offsetAt(methodRange.end);
+    const open = text.indexOf('(', methodEnd);
+    if (open < 0) continue;
+    const close = findClosingParen(text, open);
+    if (close < 0) continue;
+    const params = text.slice(open + 1, close);
+    const paramRe = new RegExp(
+      '(^|[\\s,])(' + escapeRegExp(paramName) + ')(?=\\s*[,)]|\\s*$)',
+      'm'
+    );
+    const match = paramRe.exec(params);
+    if (!match) continue;
+    const offset = open + 1 + match.index + match[1].length;
+    return new vscode.Range(
+      doc.positionAt(offset),
+      doc.positionAt(offset + paramName.length)
+    );
+  }
+  return undefined;
 }
 
 async function resolvePropertyRef(
@@ -725,23 +789,82 @@ async function resolvePropertyRef(
   pos: vscode.Position,
   value: string
 ): Promise<vscode.Location[]> {
-  // 向前找最近的 <resultMap|association|collection ... type/javaType/ofType="FQN">
   const text = doc.getText();
   const cursor = doc.offsetAt(pos);
-  const containerRe = /<(resultMap|association|collection)\b[^>]*?(?:type|javaType|ofType)="([^"]+)"/g;
-  let lastType: string | undefined;
-  let m: RegExpExecArray | null;
-  while ((m = containerRe.exec(text)) !== null) {
-    if (m.index > cursor) break;
-    lastType = m[2];
+  const containers = getOpenTagStack(scanXmlTags(text), cursor).filter((tag) =>
+    /^(resultMap|association|collection)$/.test(tag.name)
+  );
+  const current = containers[containers.length - 1];
+  if (
+    current &&
+    current.start <= cursor &&
+    cursor <= current.end &&
+    /^(association|collection)$/.test(current.name)
+  ) {
+    containers.pop();
   }
-  if (!lastType || !lastType.includes('.')) return [];
-  const javaUri = await locateJava(doc.uri.fsPath, lastType);
+  const owner = containers[containers.length - 1];
+  if (!owner) return [];
+  const ownerType = await resolveContainerType(doc, owner, new Set<string>());
+  if (!ownerType || !ownerType.includes('.')) return [];
+  const javaUri = await locateJava(doc.uri.fsPath, ownerType);
   if (!javaUri) return [];
   const javaDoc = await vscode.workspace.openTextDocument(javaUri);
   const range = findJavaFieldRange(javaDoc, value);
   if (!range) return [];
   return [new vscode.Location(javaUri, range)];
+}
+
+async function resolveContainerType(
+  doc: vscode.TextDocument,
+  container: XmlTag,
+  seen: Set<string>
+): Promise<string | undefined> {
+  const directNames =
+    container.name === 'collection'
+      ? ['ofType', 'javaType', 'type']
+      : container.name === 'association'
+        ? ['javaType', 'type']
+        : ['type'];
+  for (const name of directNames) {
+    const value = container.attributes.get(name)?.value;
+    if (value) return value;
+  }
+
+  const reference =
+    container.attributes.get('resultMap')?.value ||
+    (container.name === 'resultMap'
+      ? container.attributes.get('extends')?.value
+      : undefined);
+  if (!reference) return undefined;
+  return resolveResultMapType(doc, reference, seen);
+}
+
+async function resolveResultMapType(
+  sourceDoc: vscode.TextDocument,
+  reference: string,
+  seen: Set<string>
+): Promise<string | undefined> {
+  let targetDoc = sourceDoc;
+  let id = reference;
+  if (reference.includes('.')) {
+    const lastDot = reference.lastIndexOf('.');
+    const namespace = reference.slice(0, lastDot);
+    id = reference.slice(lastDot + 1);
+    const uri = await findXmlByNamespace(namespace, sourceDoc.uri.fsPath);
+    if (!uri) return undefined;
+    targetDoc = await vscode.workspace.openTextDocument(uri);
+  }
+
+  const key = targetDoc.uri.toString() + '#' + id;
+  if (seen.has(key)) return undefined;
+  seen.add(key);
+  const tag = findTagById(
+    scanXmlTags(targetDoc.getText()),
+    new Set(['resultMap']),
+    id
+  );
+  return tag ? resolveContainerType(targetDoc, tag, seen) : undefined;
 }
 
 async function resolveTestRef(
@@ -755,12 +878,12 @@ async function resolveTestRef(
   // 向上找所在语句的 id(mapper 方法名)
   const methodId = findEnclosingStatementId(doc, pos);
   if (!methodId) return [];
-  const nsM = doc.getText().match(/<mapper\s+namespace="([^"]+)"/);
-  if (!nsM) return [];
-  const javaUri = await locateJavaByXml(doc.uri.fsPath, nsM[1]);
+  const namespace = getMapperNamespace(doc.getText());
+  if (!namespace) return [];
+  const javaUri = await locateJavaByXml(doc.uri.fsPath, namespace);
   if (!javaUri) return [];
   const javaDoc = await vscode.workspace.openTextDocument(javaUri);
-  const range = findJavaMethodParamRange(javaDoc, methodId, word);
+  const range = await findJavaMethodParamRange(javaDoc, methodId, word);
   if (!range) return [];
   return [new vscode.Location(javaUri, range)];
 }
@@ -772,7 +895,7 @@ async function resolveFromJava(
   const info = parseJavaFqn(doc);
   if (!info) return [];
   // 不再依赖类名后缀: 有对应 namespace 的 XML 才支持跳转(覆盖 Mapper/Dao/任意命名; 纯注解 Mapper 自动排除)
-  const xmlUri = await findXmlByNamespace(info.fqn);
+  const xmlUri = await findXmlByNamespace(info.fqn, doc.uri.fsPath);
   if (!xmlUri) return [];
 
   const method = await getJavaMethodName(doc, pos);
@@ -851,7 +974,7 @@ async function javaLenses(doc: vscode.TextDocument): Promise<vscode.CodeLens[]> 
   const info = parseJavaFqn(doc);
   if (!info) return [];
   // 有对应 XML 才显示标识(纯注解 Mapper 不显示)
-  const xmlUri = await findXmlByNamespace(info.fqn);
+  const xmlUri = await findXmlByNamespace(info.fqn, doc.uri.fsPath);
   if (!xmlUri) return [];
   const methods = await collectJavaMethods(doc);
   return methods.map(
@@ -859,39 +982,41 @@ async function javaLenses(doc: vscode.TextDocument): Promise<vscode.CodeLens[]> 
       new vscode.CodeLens(m.range, {
         title: '-> XML',
         command: 'mapperJumper.jump',
-        arguments: ['java2xml', info.fqn, m.name],
+        arguments: ['java2xml', info.fqn, m.name, doc.uri.toString()],
       })
   );
 }
 
 function xmlLenses(doc: vscode.TextDocument): vscode.CodeLens[] {
-  const nsM = doc.getText().match(/<mapper\s+namespace="([^"]+)"/);
-  if (!nsM) return [];
-  const ns = nsM[1];
-  const lenses: vscode.CodeLens[] = [];
-  const re = /<(select|insert|update|delete)\b[^>]*?\bid="([^"]+)"/g;
   const text = doc.getText();
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(text)) !== null) {
-    const line = doc.positionAt(m.index).line;
+  const ns = getMapperNamespace(text);
+  if (!ns) return [];
+  const lenses: vscode.CodeLens[] = [];
+  const tags = scanXmlTags(text);
+  for (const tag of tags) {
+    const id = tag.attributes.get('id')?.value;
+    if (tag.closing || !id || !/^(select|insert|update|delete)$/.test(tag.name)) {
+      continue;
+    }
+    const line = doc.positionAt(tag.start).line;
     lenses.push(
       new vscode.CodeLens(new vscode.Range(line, 0, line, 0), {
         title: '-> Mapper',
         command: 'mapperJumper.jump',
-        arguments: ['xml2java', ns, m[2], doc.uri.toString()],
+        arguments: ['xml2java', ns, id, doc.uri.toString()],
       })
     );
   }
   // <sql id="x"> -> <include refid="x"> 用法
-  const sqlRe = /<sql\b[^>]*?\bid="([^"]+)"/g;
-  let sm: RegExpExecArray | null;
-  while ((sm = sqlRe.exec(text)) !== null) {
-    const line = doc.positionAt(sm.index).line;
+  for (const tag of tags) {
+    const id = tag.attributes.get('id')?.value;
+    if (tag.closing || tag.name !== 'sql' || !id) continue;
+    const line = doc.positionAt(tag.start).line;
     lenses.push(
       new vscode.CodeLens(new vscode.Range(line, 0, line, 0), {
         title: '-> Include',
         command: 'mapperJumper.jump',
-        arguments: ['sql2include', ns, sm[1], doc.uri.toString()],
+        arguments: ['sql2include', ns, id, doc.uri.toString()],
       })
     );
   }
@@ -931,7 +1056,8 @@ export async function jump(
   }
 
   if (direction === 'java2xml') {
-    const xmlUri = await findXmlByNamespace(fqn);
+    const currentPath = xmlUriStr ? vscode.Uri.parse(xmlUriStr).fsPath : undefined;
+    const xmlUri = await findXmlByNamespace(fqn, currentPath);
     if (!xmlUri) {
       vscode.window.showWarningMessage(`未找到 namespace=${fqn} 的 XML`);
       return;
@@ -960,12 +1086,12 @@ export async function jump(
     return;
   }
   const javaDoc = await vscode.workspace.openTextDocument(javaUri);
-  const range = findJavaMethodRange(javaDoc, cleanName);
-  if (!range) {
+  const ranges = await findJavaMethodRanges(javaDoc, cleanName);
+  if (ranges.length === 0) {
     vscode.window.showWarningMessage(`在 Mapper 中未找到方法 ${cleanName}`);
     return;
   }
-  await revealInEditor(javaDoc, range);
+  await revealInEditor(javaDoc, ranges[0]);
 }
 
 async function revealInEditor(
