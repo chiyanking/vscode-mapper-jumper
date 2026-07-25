@@ -1069,7 +1069,7 @@ function xmlLenses(doc: vscode.TextDocument): vscode.CodeLens[] {
     const line = doc.positionAt(mapper.start).line;
     lenses.push(
       new vscode.CodeLens(new vscode.Range(line, 0, line, 0), {
-        title: 'JAVA',
+        title: '-> JAVA',
         command: 'mapperJumper.jump',
         arguments: ['namespace2java', ns, '', doc.uri.toString()],
       })

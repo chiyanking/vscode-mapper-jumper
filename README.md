@@ -7,7 +7,7 @@ VSCode 插件:在 MyBatis Mapper 接口与 XML 之间双向跳转,精准定位�
 | 当前文件 | 跳转到 | 入口 |
 |---|---|---|
 | Java Mapper 类/接口名 | XML `<mapper namespace>` | 类名上方「-> XML」标识 / `Cmd/Ctrl+F12` |
-| XML `<mapper namespace>` | Java Mapper 类/接口 | 标签上方「JAVA」标识 / `Ctrl/Cmd+Click` |
+| XML `<mapper namespace>` | Java Mapper 类/接口 | 标签上方「-> JAVA」标识 / `Ctrl/Cmd+Click` |
 | `XxxMapper.java` | `XxxMapper.xml` | 方法上方「-> XML」标识(点击)/ `Cmd/Ctrl+F12`(Go to Implementation) |
 | `XxxMapper.xml` | `XxxMapper.java` | 语句上方「-> JAVA」标识(点击)/ `Ctrl/Cmd+Click`(Go to Definition) |
 | `<sql id="x">` | `<include refid="x">` | 片段上方「-> Include」标识(点击)/ `Shift+F12`(查找引用)/ `Ctrl/Cmd+Click`(Go to Definition) |
