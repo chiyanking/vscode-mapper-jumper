@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import {
   resolveTargets,
+  resolveReferences,
   provideCodeLenses,
   jump,
   ensureIndex,
@@ -59,6 +60,21 @@ export function activate(context: vscode.ExtensionContext) {
           position: vscode.Position
         ) {
           return resolveTargets(document, position);
+        },
+      }
+    )
+  );
+
+  // <sql id="x"> -> <include refid="x"> 用法:Go to References(Shift+F12 / 右键「查找引用」)
+  context.subscriptions.push(
+    vscode.languages.registerReferenceProvider(
+      { scheme: 'file', language: 'xml' },
+      {
+        provideReferences(
+          document: vscode.TextDocument,
+          position: vscode.Position
+        ) {
+          return resolveReferences(document, position);
         },
       }
     )

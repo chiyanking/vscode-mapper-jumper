@@ -2,7 +2,7 @@
   "name": "mapper-jumper",
   "displayName": "Mapper Jumper",
   "description": "MyBatis Mapper <-> XML 双向跳转(namespace 索引驱动, 支持 Mapper/Dao 等任意命名)",
-  "version": "0.0.15",
+  "version": "0.0.16",
   "license": "MIT",
   "icon": "images/icon.png",
   "publisher": "mapper-jumper",

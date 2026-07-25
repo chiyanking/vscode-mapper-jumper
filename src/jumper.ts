@@ -349,6 +349,22 @@ export async function resolveTargets(
   return [];
 }
 
+/** Go to References: <sql id="x"> -> 所有 <include refid="x"> 用法 */
+export async function resolveReferences(
+  document: vscode.TextDocument,
+  position: vscode.Position
+): Promise<vscode.Location[]> {
+  if (document.languageId !== 'xml') return [];
+  const at = getXmlAttributeAtCursor(document, position);
+  if (!at) return [];
+  if (at.tag === 'sql' && at.attr === 'id') {
+    const nsM = document.getText().match(/<mapper\s+namespace="([^"]+)"/);
+    const ns = nsM ? nsM[1] : '';
+    return findIncludeUsages(document, ns, at.value);
+  }
+  return [];
+}
+
 async function resolveFromXml(
   doc: vscode.TextDocument,
   pos: vscode.Position
@@ -360,6 +376,10 @@ async function resolveFromXml(
   // select|insert|update|delete 的 id -> mapper 方法
   if (attr === 'id' && /^(select|insert|update|delete)$/.test(tag)) {
     return resolveXmlIdToJava(doc, value);
+  }
+  // <sql id="x"> 的 id -> <include refid="x"> 用法(含跨文件 namespace.id)
+  if (attr === 'id' && tag === 'sql') {
+    return resolveSqlIdToIncludes(doc, value);
   }
   // resultMap 引用 -> <resultMap id="...">
   if (attr === 'resultMap') {
@@ -513,6 +533,133 @@ function findSqlIdRange(
     }
   }
   return undefined;
+}
+
+/** <include refid="id"> 的 refid 值 range 列表(同文件, 基于 doc.positionAt) */
+function findIncludeRefRanges(
+  doc: vscode.TextDocument,
+  id: string
+): vscode.Range[] {
+  const text = doc.getText();
+  const ranges: vscode.Range[] = [];
+  const re = new RegExp(
+    '<include\\b[^>]*?\\brefid="' + escapeRegExp(id) + '"',
+    'g'
+  );
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    const idIdx = text.indexOf('refid="' + id + '"', m.index);
+    if (idIdx >= 0) {
+      const valueStart = idIdx + 'refid="'.length;
+      ranges.push(
+        new vscode.Range(
+          doc.positionAt(valueStart),
+          doc.positionAt(valueStart + id.length)
+        )
+      );
+    }
+  }
+  return ranges;
+}
+
+/** 原始文本 offset -> Position(兼容 \r\n / \r / \n 行结束符) */
+function offsetToPosition(text: string, offset: number): vscode.Position {
+  let line = 0;
+  let lineStart = 0;
+  for (let i = 0; i < offset; i++) {
+    const ch = text[i];
+    if (ch === '\n') {
+      line++;
+      lineStart = i + 1;
+    } else if (ch === '\r') {
+      line++;
+      if (text[i + 1] === '\n') i++; // 跳过 \r\n 的 \n
+      lineStart = i + 1;
+    }
+  }
+  return new vscode.Position(line, offset - lineStart);
+}
+
+/** <include refid="id"> 的 refid 值 range 列表(跨文件, 基于原始文本) */
+function findIncludeRefRangesInText(
+  text: string,
+  id: string
+): vscode.Range[] {
+  const ranges: vscode.Range[] = [];
+  const re = new RegExp(
+    '<include\\b[^>]*?\\brefid="' + escapeRegExp(id) + '"',
+    'g'
+  );
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    const idIdx = text.indexOf('refid="' + id + '"', m.index);
+    if (idIdx >= 0) {
+      const valueStart = idIdx + 'refid="'.length;
+      ranges.push(
+        new vscode.Range(
+          offsetToPosition(text, valueStart),
+          offsetToPosition(text, valueStart + id.length)
+        )
+      );
+    }
+  }
+  return ranges;
+}
+
+async function readTextSafe(uri: vscode.Uri): Promise<string | undefined> {
+  try {
+    return await readText(uri);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * 查找 <sql id="id">(所属 namespace 下) 的所有 <include> 用法:
+ * - 同文件短形式 refid="id"
+ * - 跨文件前缀形式 refid="namespace.id"
+ */
+async function findIncludeUsages(
+  xmlDoc: vscode.TextDocument,
+  namespace: string,
+  id: string
+): Promise<vscode.Location[]> {
+  const locs: vscode.Location[] = [];
+  // 同文件: 短形式 refid="id"
+  for (const r of findIncludeRefRanges(xmlDoc, id)) {
+    locs.push(new vscode.Location(xmlDoc.uri, r));
+  }
+  const prefixed = namespace ? namespace + '.' + id : '';
+  if (!prefixed) return locs;
+  // 同文件: 前缀形式 refid="namespace.id"(罕见)
+  for (const r of findIncludeRefRanges(xmlDoc, prefixed)) {
+    locs.push(new vscode.Location(xmlDoc.uri, r));
+  }
+  // 跨文件: 仅前缀形式 refid="namespace.id"
+  await ensureIndex();
+  const others: vscode.Uri[] = [];
+  for (const u of nsIndex.values()) {
+    if (u.toString() !== xmlDoc.uri.toString()) others.push(u);
+  }
+  const texts = await Promise.all(
+    others.map(async (u) => ({ uri: u, text: await readTextSafe(u) }))
+  );
+  for (const { uri, text } of texts) {
+    if (!text) continue;
+    for (const r of findIncludeRefRangesInText(text, prefixed)) {
+      locs.push(new vscode.Location(uri, r));
+    }
+  }
+  return locs;
+}
+
+async function resolveSqlIdToIncludes(
+  doc: vscode.TextDocument,
+  id: string
+): Promise<vscode.Location[]> {
+  const nsM = doc.getText().match(/<mapper\s+namespace="([^"]+)"/);
+  const ns = nsM ? nsM[1] : '';
+  return findIncludeUsages(doc, ns, id);
 }
 
 /** 向上找光标所在的最近 <select|insert|update|delete id="x"> 的 id */
@@ -735,6 +882,19 @@ function xmlLenses(doc: vscode.TextDocument): vscode.CodeLens[] {
       })
     );
   }
+  // <sql id="x"> -> <include refid="x"> 用法
+  const sqlRe = /<sql\b[^>]*?\bid="([^"]+)"/g;
+  let sm: RegExpExecArray | null;
+  while ((sm = sqlRe.exec(text)) !== null) {
+    const line = doc.positionAt(sm.index).line;
+    lenses.push(
+      new vscode.CodeLens(new vscode.Range(line, 0, line, 0), {
+        title: '-> Include',
+        command: 'mapperJumper.jump',
+        arguments: ['sql2include', ns, sm[1], doc.uri.toString()],
+      })
+    );
+  }
   return lenses;
 }
 
@@ -749,6 +909,26 @@ export async function jump(
   xmlUriStr?: string
 ): Promise<void> {
   const cleanName = name.split('(')[0].trim();
+
+  if (direction === 'sql2include') {
+    if (!xmlUriStr) return;
+    const xmlUri = vscode.Uri.parse(xmlUriStr);
+    const xmlDoc = await vscode.workspace.openTextDocument(xmlUri);
+    const locs = await findIncludeUsages(xmlDoc, fqn, cleanName);
+    if (locs.length === 0) {
+      vscode.window.showWarningMessage(
+        `未找到 refid="${cleanName}" 的 <include> 用法`
+      );
+      return;
+    }
+    const first = locs[0];
+    const targetDoc =
+      first.uri.toString() === xmlUri.toString()
+        ? xmlDoc
+        : await vscode.workspace.openTextDocument(first.uri);
+    await revealInEditor(targetDoc, first.range);
+    return;
+  }
 
   if (direction === 'java2xml') {
     const xmlUri = await findXmlByNamespace(fqn);

@@ -8,6 +8,8 @@ VSCode 插件:在 MyBatis Mapper 接口与 XML 之间双向跳转,精准定位�
 |---|---|---|
 | `XxxMapper.java` | `XxxMapper.xml` | 方法上方「-> XML」标识(点击)/ `Cmd/Ctrl+F12`(Go to Implementation) |
 | `XxxMapper.xml` | `XxxMapper.java` | 语句上方「-> Mapper」标识(点击)/ `Ctrl/Cmd+Click`(Go to Definition) |
+| `<sql id="x">` | `<include refid="x">` | 片段上方「-> Include」标识(点击)/ `Shift+F12`(查找引用)/ `Ctrl/Cmd+Click`(Go to Definition) |
+| `<include refid="x">` | `<sql id="x">` | `Ctrl/Cmd+Click`(Go to Definition) |
 
 1. **CodeLens 标识**:打开 `XxxMapper.java`,每个方法上方显示「-> XML」,点击跳到 XML 对应语句;打开 `XxxMapper.xml`,每条语句上方显示「-> Mapper」,点击跳回 Java 方法。
 2. **Go to Implementation**:`XxxMapper.java` 方法上 `Cmd/Ctrl+F12`(或右键「转到实现」)跳 XML。
@@ -39,3 +41,4 @@ npm run compile      # 或 npm run watch
 
 - 不处理 `@Select` 等注解 SQL(它们不在 XML 中)。
 - 方法名解析优先调用 Java 语言服务的 DocumentSymbol(需 Red Hat Java 扩展),失败时回退到正则。
+- `<sql id="x">` 片段支持双向跳转:`<include refid="x">` -> 定义,`<sql id="x">` -> 所有用法。跨文件引用以 `namespace.id` 前缀形式匹配(短形式仅同文件内生效)。
