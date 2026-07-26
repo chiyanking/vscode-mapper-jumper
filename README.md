@@ -1,58 +1,58 @@
 # Mapper Jumper
 
-VSCode 插件，用于在 MyBatis Mapper Java 接口与 XML 映射文件之间双向跳转。关联以 `<mapper namespace>` 为准，不依赖 `Mapper`、`Dao` 等类名后缀，也不注册自定义快捷键。
+A VS Code extension for bidirectional navigation between MyBatis Mapper Java interfaces and XML mapping files. Associations are resolved through `<mapper namespace>` values, without relying on class-name suffixes such as `Mapper` or `Dao`. The extension does not register custom keyboard shortcuts.
 
-## 跳转入口
+## Navigation
 
-| 当前符号 | 跳转目标 | 入口 |
+| Current symbol | Target | Action |
 |---|---|---|
-| Java Mapper 类/接口名 | XML `<mapper namespace>` | `-> XML` CodeLens / `Cmd/Ctrl+F12` |
-| Java Mapper 类/接口名 | XML `<mapper namespace>`(作为引用) | `Shift+F12` |
-| Java Mapper 方法 | XML CRUD 语句的 `id` | `-> XML` CodeLens / `Cmd/Ctrl+F12` |
-| Java Mapper 方法 | XML CRUD 语句的 `id`(作为引用) | `Shift+F12` |
-| XML `<mapper namespace>` | Java Mapper 类/接口 | `-> JAVA` CodeLens / `Ctrl/Cmd+Click` / `F12` |
-| XML CRUD 语句的 `id` | Java Mapper 方法 | `-> JAVA` CodeLens / `Ctrl/Cmd+Click` / `F12` |
-| XML `<sql id="x">` | 所有 `<include>` 用法 | `-> Include` CodeLens / `Shift+F12` / `Ctrl/Cmd+Click` |
+| Java Mapper class or interface name | XML `<mapper namespace>` | `-> XML` CodeLens / `Cmd/Ctrl+F12` |
+| Java Mapper class or interface name | XML `<mapper namespace>` reference | `Shift+F12` |
+| Java Mapper method | XML CRUD statement `id` | `-> XML` CodeLens / `Cmd/Ctrl+F12` |
+| Java Mapper method | XML CRUD statement `id` reference | `Shift+F12` |
+| XML `<mapper namespace>` | Java Mapper class or interface | `-> JAVA` CodeLens / `Ctrl/Cmd+Click` / `F12` |
+| XML CRUD statement `id` | Java Mapper method | `-> JAVA` CodeLens / `Ctrl/Cmd+Click` / `F12` |
+| XML `<sql id="x">` | All `<include>` usages | `-> Include` CodeLens / `Shift+F12` / `Ctrl/Cmd+Click` |
 | XML `<include refid="x">` | `<sql id="x">` | `Ctrl/Cmd+Click` / `F12` |
 
-CodeLens 需要开启 VSCode 的 `editor.codeLens` 设置，该设置默认开启。
+CodeLens requires the VS Code `editor.codeLens` setting, which is enabled by default.
 
-## XML 跳转支持
+## XML Navigation
 
-| XML 属性 | 跳转目标 |
+| XML attribute or expression | Target |
 |---|---|
-| `<mapper namespace>` | Java 类或接口声明 |
-| `<select/insert/update/delete id>` | Mapper 方法声明 |
-| `<sql id>` | `<include refid>` 用法 |
-| `refid` | `<sql id>` 定义，支持 `namespace.id` |
-| `resultMap` | `<resultMap id>` 定义，支持跨 namespace |
-| `select` | 对应 `<select id>` 定义 |
-| `resultType`、`parameterType`、`type`、`javaType`、`ofType` | Java 全限定类型声明 |
-| `property` | 当前 `resultMap`、`association` 或 `collection` 对应 Java 类型的字段 |
-| `test` 表达式变量 | 当前 CRUD 语句对应 Mapper 方法的 Java 参数或参数对象字段 |
-| `#{...}` 变量 | Mapper 方法的 Java 参数或参数对象字段 |
+| `<mapper namespace>` | Java class or interface declaration |
+| `<select/insert/update/delete id>` | Mapper method declaration |
+| `<sql id>` | `<include refid>` usages |
+| `refid` | `<sql id>` definition; supports `namespace.id` |
+| `resultMap` | `<resultMap id>` definition; supports cross-namespace references |
+| `select` | Matching `<select id>` definition |
+| `resultType`, `parameterType`, `type`, `javaType`, `ofType` | Fully qualified Java type declaration |
+| `property` | Field on the Java type associated with the current `resultMap`, `association`, or `collection` |
+| Variables in `test` expressions | Java parameter or parameter-object field of the corresponding Mapper method |
+| Variables in `#{...}` | Java parameter or parameter-object field of the corresponding Mapper method |
 
-XML 扫描支持单双引号、等号两侧空格、任意属性顺序，以及属性值中的 `>`。注释、CDATA、处理指令和 DOCTYPE 中的伪标签不会参与跳转。
+The XML scanner supports single and double quotes, whitespace around equals signs, arbitrary attribute order, and `>` characters inside attribute values. Pseudo-tags inside comments, CDATA sections, processing instructions, and DOCTYPE declarations are ignored.
 
-## 关联与索引
+## Association and Indexing
 
-- 激活后扫描工作区 XML，建立 `namespace -> XML[]` 内存索引，并通过文件监听器增量维护。
-- 同一个 namespace 存在多个 XML 时，优先选择与当前文件相同模块、相同 workspace folder、公共路径最长的候选。
-- XML 到 Java 优先把同模块的 `src/main/resources` 映射为 `src/main/java`，找不到时再搜索工作区。
-- Java 到 XML 通过 namespace 索引定位，因此纯注解 Mapper 不显示 CodeLens。
-- 扫描会排除 `.git`、`.gradle`、`target`、`build`、`out`、`dist` 和 `node_modules`。
+- On activation, the extension scans workspace XML files, builds an in-memory `namespace -> XML[]` index, and maintains it incrementally with a file watcher.
+- When multiple XML files use the same namespace, candidates are ranked by module, workspace folder, and longest common path prefix with the current file.
+- XML-to-Java navigation first maps `src/main/resources` to `src/main/java` in the same module, then searches the workspace.
+- Java-to-XML navigation uses the namespace index, so annotation-only Mappers do not display CodeLens entries.
+- Scans exclude `.git`, `.gradle`, `target`, `build`, `out`, `dist`, and `node_modules`.
 
-源码根兼容标准 Maven 结构 `src/main/java`，以及老式 `src/` 结构。
+Source-root detection supports the standard Maven `src/main/java` layout and the legacy `src/` layout.
 
-## 限制
+## Limitations
 
-- 不处理 `@Select`、`@Insert` 等注解 SQL。
-- Java 类型跳转要求 XML 中使用全限定类名；`map`、`string`、项目自定义 typeAlias 等别名不会跳转。
-- `test` 和 `#{...}` 支持 Java 参数名、`@Param` 别名及点分隔的对象字段路径。
-- Java 方法和类型定位优先使用 Java 语言服务的 DocumentSymbol；语言服务不可用时使用内置降级解析。
-- 跨文件 `<include>` 仅匹配带 namespace 前缀的 `refid="namespace.id"`；短 `refid="id"` 只在当前 XML 内匹配。
+- Annotation-based SQL such as `@Select` and `@Insert` is not supported.
+- Java type navigation requires fully qualified class names in XML. Aliases such as `map`, `string`, and custom type aliases are not resolved.
+- `test` and `#{...}` bindings support Java parameter names, `@Param` aliases, and dot-separated object field paths.
+- Java method and type lookup uses DocumentSymbol results from the Java language service when available, with a built-in fallback scanner otherwise.
+- Cross-file `<include>` navigation only matches namespace-qualified references such as `refid="namespace.id"`. Short references such as `refid="id"` are only matched within the current XML file.
 
-## 开发
+## Development
 
 ```bash
 npm install
@@ -60,9 +60,9 @@ npm run compile
 npm test
 ```
 
-使用 `npm run watch` 持续编译，或在 VSCode 中按 `F5` 启动扩展开发宿主。
+Use `npm run watch` for continuous compilation, or press `F5` in VS Code to launch an Extension Development Host.
 
-打包 VSIX：
+Package a VSIX file with:
 
 ```bash
 npx @vscode/vsce package

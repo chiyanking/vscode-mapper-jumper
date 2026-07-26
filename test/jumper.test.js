@@ -58,6 +58,13 @@ class Location {
   }
 }
 
+class CodeLens {
+  constructor(range, command) {
+    this.range = range;
+    this.command = command;
+  }
+}
+
 class TextDocument {
   constructor(fileName, languageId, text) {
     this.fileName = fileName;
@@ -92,7 +99,7 @@ class TextDocument {
   }
 }
 
-test('resolves OGNL and placeholder bindings to mapper parameters and DTO fields', async () => {
+test('resolves XML bindings and routes CodeLens jumps through navigation history', async () => {
   const root = '/workspace/project';
   const mapperPath = path.join(
     root,
@@ -168,15 +175,20 @@ public class Address {
     ],
   ]);
 
+  const navigationCalls = [];
   const vscodeMock = {
     Position,
     Range,
     Uri,
     Location,
+    CodeLens,
     SymbolKind: { Method: 1, Class: 2, Interface: 3, Enum: 4, Struct: 5 },
     commands: {
-      async executeCommand() {
-        throw new Error('language service unavailable in test');
+      async executeCommand(command, ...args) {
+        if (command === 'vscode.executeDocumentSymbolProvider') {
+          throw new Error('language service unavailable in test');
+        }
+        navigationCalls.push({ command, args });
       },
     },
     workspace: {
@@ -207,7 +219,7 @@ public class Address {
     if (request === 'vscode') return vscodeMock;
     return originalLoad.call(this, request, parent, isMain);
   };
-  const { resolveTargets } = require('../out/jumper');
+  const { jump, provideCodeLenses, resolveTargets } = require('../out/jumper');
   Module._load = originalLoad;
 
   const xmlDoc = documents.get(xmlPath);
@@ -242,4 +254,42 @@ public class Address {
   );
   assert.equal(implicitPlanType.uri.fsPath, dtoPath);
   assert.equal(documents.get(dtoPath).getText(implicitPlanType.range), 'planType');
+
+  const mapperDoc = documents.get(mapperPath);
+  const lenses = await provideCodeLenses(mapperDoc);
+  const methodLens = lenses.find(
+    (lens) => lens.command.arguments[0] === 'java2xml'
+  );
+  assert.ok(methodLens);
+  assert.equal(methodLens.command.arguments[3], mapperDoc.uri.toString());
+  assert.deepEqual(methodLens.command.arguments[4], methodLens.range.start);
+
+  await jump(...methodLens.command.arguments);
+  assert.equal(navigationCalls.length, 1);
+  assert.equal(navigationCalls[0].command, 'editor.action.goToLocations');
+  const [sourceUri, sourcePosition, locations, mode] = navigationCalls[0].args;
+  assert.equal(sourceUri.fsPath, mapperPath);
+  assert.deepEqual(sourcePosition, methodLens.range.start);
+  assert.equal(mode, 'goto');
+  assert.equal(locations.length, 1);
+  assert.equal(locations[0].uri.fsPath, xmlPath);
+  assert.equal(xmlDoc.getText(locations[0].range), 'update');
+
+  const xmlLenses = await provideCodeLenses(xmlDoc);
+  const xmlMethodLens = xmlLenses.find(
+    (lens) => lens.command.arguments[0] === 'xml2java'
+  );
+  assert.ok(xmlMethodLens);
+  await jump(...xmlMethodLens.command.arguments);
+  assert.equal(navigationCalls.length, 2);
+  const xmlNavigation = navigationCalls[1];
+  assert.equal(xmlNavigation.command, 'editor.action.goToLocations');
+  const [xmlSourceUri, xmlSourcePosition, javaLocations, xmlMode] =
+    xmlNavigation.args;
+  assert.equal(xmlSourceUri.fsPath, xmlPath);
+  assert.deepEqual(xmlSourcePosition, xmlMethodLens.command.arguments[4]);
+  assert.equal(xmlMode, 'goto');
+  assert.equal(javaLocations.length, 1);
+  assert.equal(javaLocations[0].uri.fsPath, mapperPath);
+  assert.equal(mapperDoc.getText(javaLocations[0].range), 'update');
 });

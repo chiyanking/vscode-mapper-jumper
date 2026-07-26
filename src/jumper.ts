@@ -1290,7 +1290,7 @@ async function collectJavaMethods(
     const out: vscode.DocumentSymbol[] = [];
     collectMethodSymbols(symbols, out);
     if (out.length) {
-      return out.map((s) => ({ name: s.name, range: s.range }));
+      return out.map((s) => ({ name: s.name, range: s.selectionRange }));
     }
   } catch {
     // 走正则
@@ -1367,7 +1367,13 @@ async function javaLenses(doc: vscode.TextDocument): Promise<vscode.CodeLens[]> 
       new vscode.CodeLens(m.range, {
         title: '-> XML',
         command: 'mapperJumper.jump',
-        arguments: ['java2xml', info.fqn, m.name, doc.uri.toString()],
+        arguments: [
+          'java2xml',
+          info.fqn,
+          m.name,
+          doc.uri.toString(),
+          m.range.start,
+        ],
       })
   );
   const typeRange = await findJavaTypeRange(doc, info.className);
@@ -1376,7 +1382,13 @@ async function javaLenses(doc: vscode.TextDocument): Promise<vscode.CodeLens[]> 
       new vscode.CodeLens(typeRange, {
         title: '-> XML',
         command: 'mapperJumper.jump',
-        arguments: ['java2namespace', info.fqn, '', doc.uri.toString()],
+        arguments: [
+          'java2namespace',
+          info.fqn,
+          '',
+          doc.uri.toString(),
+          typeRange.start,
+        ],
       })
     );
   }
@@ -1392,11 +1404,20 @@ function xmlLenses(doc: vscode.TextDocument): vscode.CodeLens[] {
   const mapper = tags.find((tag) => !tag.closing && tag.name === 'mapper');
   if (mapper) {
     const line = doc.positionAt(mapper.start).line;
+    const sourcePosition =
+      rangeForAttribute(doc, mapper, 'namespace')?.start ||
+      new vscode.Position(line, 0);
     lenses.push(
       new vscode.CodeLens(new vscode.Range(line, 0, line, 0), {
         title: '-> JAVA',
         command: 'mapperJumper.jump',
-        arguments: ['namespace2java', ns, '', doc.uri.toString()],
+        arguments: [
+          'namespace2java',
+          ns,
+          '',
+          doc.uri.toString(),
+          sourcePosition,
+        ],
       })
     );
   }
@@ -1406,11 +1427,19 @@ function xmlLenses(doc: vscode.TextDocument): vscode.CodeLens[] {
       continue;
     }
     const line = doc.positionAt(tag.start).line;
+    const sourcePosition =
+      rangeForAttribute(doc, tag, 'id')?.start || new vscode.Position(line, 0);
     lenses.push(
       new vscode.CodeLens(new vscode.Range(line, 0, line, 0), {
         title: '-> JAVA',
         command: 'mapperJumper.jump',
-        arguments: ['xml2java', ns, id, doc.uri.toString()],
+        arguments: [
+          'xml2java',
+          ns,
+          id,
+          doc.uri.toString(),
+          sourcePosition,
+        ],
       })
     );
   }
@@ -1419,11 +1448,19 @@ function xmlLenses(doc: vscode.TextDocument): vscode.CodeLens[] {
     const id = tag.attributes.get('id')?.value;
     if (tag.closing || tag.name !== 'sql' || !id) continue;
     const line = doc.positionAt(tag.start).line;
+    const sourcePosition =
+      rangeForAttribute(doc, tag, 'id')?.start || new vscode.Position(line, 0);
     lenses.push(
       new vscode.CodeLens(new vscode.Range(line, 0, line, 0), {
         title: '-> Include',
         command: 'mapperJumper.jump',
-        arguments: ['sql2include', ns, id, doc.uri.toString()],
+        arguments: [
+          'sql2include',
+          ns,
+          id,
+          doc.uri.toString(),
+          sourcePosition,
+        ],
       })
     );
   }
@@ -1438,13 +1475,14 @@ export async function jump(
   direction: string,
   fqn: string,
   name: string,
-  xmlUriStr?: string
+  sourceUriStr?: string,
+  sourcePosition?: vscode.Position
 ): Promise<void> {
   const cleanName = name.split('(')[0].trim();
 
   if (direction === 'sql2include') {
-    if (!xmlUriStr) return;
-    const xmlUri = vscode.Uri.parse(xmlUriStr);
+    if (!sourceUriStr) return;
+    const xmlUri = vscode.Uri.parse(sourceUriStr);
     const xmlDoc = await vscode.workspace.openTextDocument(xmlUri);
     const locs = await findIncludeUsages(xmlDoc, fqn, cleanName);
     if (locs.length === 0) {
@@ -1458,13 +1496,18 @@ export async function jump(
       first.uri.toString() === xmlUri.toString()
         ? xmlDoc
         : await vscode.workspace.openTextDocument(first.uri);
-    await revealInEditor(targetDoc, first.range);
+    await navigateFromCodeLens(
+      sourceUriStr,
+      sourcePosition,
+      targetDoc,
+      first.range
+    );
     return;
   }
 
   if (direction === 'namespace2java') {
-    if (!xmlUriStr) return;
-    const xmlUri = vscode.Uri.parse(xmlUriStr);
+    if (!sourceUriStr) return;
+    const xmlUri = vscode.Uri.parse(sourceUriStr);
     const javaUri = await locateJavaByXml(xmlUri.fsPath, fqn);
     if (!javaUri) {
       vscode.window.showWarningMessage(`未找到 ${fqn}`);
@@ -1477,12 +1520,19 @@ export async function jump(
       vscode.window.showWarningMessage(`在 Java 文件中未找到类型 ${className}`);
       return;
     }
-    await revealInEditor(javaDoc, range);
+    await navigateFromCodeLens(
+      sourceUriStr,
+      sourcePosition,
+      javaDoc,
+      range
+    );
     return;
   }
 
   if (direction === 'java2namespace') {
-    const currentPath = xmlUriStr ? vscode.Uri.parse(xmlUriStr).fsPath : undefined;
+    const currentPath = sourceUriStr
+      ? vscode.Uri.parse(sourceUriStr).fsPath
+      : undefined;
     const xmlUri = await findXmlByNamespace(fqn, currentPath);
     if (!xmlUri) {
       vscode.window.showWarningMessage(`未找到 namespace=${fqn} 的 XML`);
@@ -1494,12 +1544,19 @@ export async function jump(
       vscode.window.showWarningMessage(`XML 中未找到 namespace=${fqn}`);
       return;
     }
-    await revealInEditor(xmlDoc, range);
+    await navigateFromCodeLens(
+      sourceUriStr,
+      sourcePosition,
+      xmlDoc,
+      range
+    );
     return;
   }
 
   if (direction === 'java2xml') {
-    const currentPath = xmlUriStr ? vscode.Uri.parse(xmlUriStr).fsPath : undefined;
+    const currentPath = sourceUriStr
+      ? vscode.Uri.parse(sourceUriStr).fsPath
+      : undefined;
     const xmlUri = await findXmlByNamespace(fqn, currentPath);
     if (!xmlUri) {
       vscode.window.showWarningMessage(`未找到 namespace=${fqn} 的 XML`);
@@ -1511,12 +1568,17 @@ export async function jump(
       vscode.window.showWarningMessage(`在 XML 中未找到 id="${cleanName}"`);
       return;
     }
-    await revealInEditor(xmlDoc, range);
+    await navigateFromCodeLens(
+      sourceUriStr,
+      sourcePosition,
+      xmlDoc,
+      range
+    );
     return;
   }
 
-  if (!xmlUriStr) return;
-  const xmlUri = vscode.Uri.parse(xmlUriStr);
+  if (!sourceUriStr) return;
+  const xmlUri = vscode.Uri.parse(sourceUriStr);
   let javaUri: vscode.Uri | undefined;
   const javaRoot = xmlPathToJavaRoot(xmlUri.fsPath);
   if (javaRoot) {
@@ -1534,7 +1596,35 @@ export async function jump(
     vscode.window.showWarningMessage(`在 Mapper 中未找到方法 ${cleanName}`);
     return;
   }
-  await revealInEditor(javaDoc, ranges[0]);
+  await navigateFromCodeLens(
+    sourceUriStr,
+    sourcePosition,
+    javaDoc,
+    ranges[0]
+  );
+}
+
+async function navigateFromCodeLens(
+  sourceUriStr: string | undefined,
+  sourcePosition: vscode.Position | undefined,
+  targetDoc: vscode.TextDocument,
+  targetRange: vscode.Range
+): Promise<void> {
+  if (sourceUriStr && sourcePosition) {
+    try {
+      await vscode.commands.executeCommand(
+        'editor.action.goToLocations',
+        vscode.Uri.parse(sourceUriStr),
+        sourcePosition,
+        [new vscode.Location(targetDoc.uri, targetRange)],
+        'goto'
+      );
+      return;
+    } catch {
+      // Older VS Code versions can fall back to direct editor navigation.
+    }
+  }
+  await revealInEditor(targetDoc, targetRange);
 }
 
 async function revealInEditor(
