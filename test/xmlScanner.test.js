@@ -33,14 +33,6 @@ test('records the exact value range when attribute name equals value', () => {
   assert.equal(attr.valueStart, text.indexOf('"id"') + 1);
 });
 
-test('preserves a wildcard mapper namespace and its exact value range', () => {
-  const text = `<mapper namespace="*">`;
-  const [mapper] = scanXmlTags(text);
-  const namespace = mapper.attributes.get('namespace');
-  assert.equal(namespace.value, '*');
-  assert.equal(text.slice(namespace.valueStart, namespace.valueEnd), '*');
-});
-
 test('ignores tags inside comments and CDATA', () => {
   const text = `<!-- <select id="wrong"> --><![CDATA[<if test="x > 1">]]><select id="right">`;
   const tags = scanXmlTags(text);

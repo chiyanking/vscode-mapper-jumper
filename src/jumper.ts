@@ -449,7 +449,7 @@ export async function resolveTargets(
 
 /** Go to References:
  *  - XML <sql id="x"> -> 所有 <include refid="x"> 用法
- *  - Java Mapper 类/接口名 -> 对应 <mapper namespace="..."> 及通配 namespace="*"
+ *  - Java Mapper 类/接口名 -> 对应 <mapper namespace="...">
  *  - Java Mapper 方法名 -> 对应 XML CRUD 语句的 id
  */
 export async function resolveReferences(
@@ -479,26 +479,15 @@ async function resolveJavaReferences(
 
   const typeRange = await findJavaTypeRange(doc, info.className);
   const exactXmlUri = await findXmlByNamespace(info.fqn, doc.uri.fsPath);
-  // 精确 namespace 是识别 Mapper 类型的前提，避免通配 XML 污染普通 Java 类的引用。
+  // 精确 namespace 是识别 Mapper 类型的前提。
   if (!exactXmlUri) return [];
 
+  const xmlDoc = await vscode.workspace.openTextDocument(exactXmlUri);
   if (typeRange?.contains(pos)) {
-    const wildcardXmlUri = await findXmlByNamespace('*', doc.uri.fsPath);
-    const xmlUris = wildcardXmlUri
-      ? [exactXmlUri, wildcardXmlUri]
-      : [exactXmlUri];
-    const locations = await Promise.all(
-      xmlUris.map(async (xmlUri) => {
-        const xmlDoc = await vscode.workspace.openTextDocument(xmlUri);
-        const namespaceRange = findMapperNamespaceRange(xmlDoc);
-        return namespaceRange
-          ? new vscode.Location(xmlUri, namespaceRange)
-          : undefined;
-      })
-    );
-    return locations.filter(
-      (location): location is vscode.Location => Boolean(location)
-    );
+    const namespaceRange = findMapperNamespaceRange(xmlDoc);
+    return namespaceRange
+      ? [new vscode.Location(exactXmlUri, namespaceRange)]
+      : [];
   }
 
   const method = await getJavaMethodName(doc, pos);
@@ -507,7 +496,6 @@ async function resolveJavaReferences(
   const declarationRanges = await findJavaMethodRanges(doc, methodName);
   if (!declarationRanges.some((range) => range.contains(pos))) return [];
 
-  const xmlDoc = await vscode.workspace.openTextDocument(exactXmlUri);
   const idRange = findXmlIdRange(xmlDoc, methodName);
   return idRange ? [new vscode.Location(exactXmlUri, idRange)] : [];
 }
