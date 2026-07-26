@@ -450,6 +450,7 @@ export async function resolveTargets(
 /** Go to References:
  *  - XML <sql id="x"> -> 所有 <include refid="x"> 用法
  *  - Java Mapper 类/接口名 -> 对应 <mapper namespace="..."> 及通配 namespace="*"
+ *  - Java Mapper 方法名 -> 对应 XML CRUD 语句的 id
  */
 export async function resolveReferences(
   document: vscode.TextDocument,
@@ -468,37 +469,47 @@ export async function resolveReferences(
   return [];
 }
 
-/** Java Mapper 类/接口名声明上的 References: 返回精确 namespace 及就近的通配 namespace */
+/** Java Mapper 类型/方法声明上的 XML References */
 async function resolveJavaReferences(
   doc: vscode.TextDocument,
   pos: vscode.Position
 ): Promise<vscode.Location[]> {
   const info = parseJavaFqn(doc);
   if (!info) return [];
-  // 仅在类/接口名声明上触发(与方法级 Implementation 区分)
-  const typeRange = await findJavaTypeRange(doc, info.className);
-  if (!typeRange?.contains(pos)) return [];
 
+  const typeRange = await findJavaTypeRange(doc, info.className);
   const exactXmlUri = await findXmlByNamespace(info.fqn, doc.uri.fsPath);
   // 精确 namespace 是识别 Mapper 类型的前提，避免通配 XML 污染普通 Java 类的引用。
   if (!exactXmlUri) return [];
 
-  const wildcardXmlUri = await findXmlByNamespace('*', doc.uri.fsPath);
-  const xmlUris = wildcardXmlUri
-    ? [exactXmlUri, wildcardXmlUri]
-    : [exactXmlUri];
-  const locations = await Promise.all(
-    xmlUris.map(async (xmlUri) => {
-      const xmlDoc = await vscode.workspace.openTextDocument(xmlUri);
-      const namespaceRange = findMapperNamespaceRange(xmlDoc);
-      return namespaceRange
-        ? new vscode.Location(xmlUri, namespaceRange)
-        : undefined;
-    })
-  );
-  return locations.filter(
-    (location): location is vscode.Location => Boolean(location)
-  );
+  if (typeRange?.contains(pos)) {
+    const wildcardXmlUri = await findXmlByNamespace('*', doc.uri.fsPath);
+    const xmlUris = wildcardXmlUri
+      ? [exactXmlUri, wildcardXmlUri]
+      : [exactXmlUri];
+    const locations = await Promise.all(
+      xmlUris.map(async (xmlUri) => {
+        const xmlDoc = await vscode.workspace.openTextDocument(xmlUri);
+        const namespaceRange = findMapperNamespaceRange(xmlDoc);
+        return namespaceRange
+          ? new vscode.Location(xmlUri, namespaceRange)
+          : undefined;
+      })
+    );
+    return locations.filter(
+      (location): location is vscode.Location => Boolean(location)
+    );
+  }
+
+  const method = await getJavaMethodName(doc, pos);
+  if (!method) return [];
+  const methodName = method.split('(')[0].trim();
+  const declarationRanges = await findJavaMethodRanges(doc, methodName);
+  if (!declarationRanges.some((range) => range.contains(pos))) return [];
+
+  const xmlDoc = await vscode.workspace.openTextDocument(exactXmlUri);
+  const idRange = findXmlIdRange(xmlDoc, methodName);
+  return idRange ? [new vscode.Location(exactXmlUri, idRange)] : [];
 }
 
 async function resolveFromXml(

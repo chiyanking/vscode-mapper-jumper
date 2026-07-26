@@ -80,8 +80,8 @@ export function activate(context: vscode.ExtensionContext) {
     )
   );
 
-  // Java Mapper 类/接口名 -> XML <mapper namespace>:Go to References(Shift+F12)
-  // 结果与 Java 语言服务的引用合并，补充显示精确及通配 XML 引用
+  // Java Mapper 类型/方法 -> XML namespace/id:Go to References(Shift+F12)
+  // 结果与 Java 语言服务的引用合并，补充显示 XML 引用
   context.subscriptions.push(
     vscode.languages.registerReferenceProvider(
       { scheme: 'file', language: 'java' },

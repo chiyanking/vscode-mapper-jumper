@@ -9,6 +9,7 @@ VSCode 插件，用于在 MyBatis Mapper Java 接口与 XML 映射文件之间�
 | Java Mapper 类/接口名 | XML `<mapper namespace>` | `-> XML` CodeLens / `Cmd/Ctrl+F12` |
 | Java Mapper 类/接口名 | XML `<mapper namespace>`(作为引用) | `Shift+F12` |
 | Java Mapper 方法 | XML CRUD 语句的 `id` | `-> XML` CodeLens / `Cmd/Ctrl+F12` |
+| Java Mapper 方法 | XML CRUD 语句的 `id`(作为引用) | `Shift+F12` |
 | XML `<mapper namespace>` | Java Mapper 类/接口 | `-> JAVA` CodeLens / `Ctrl/Cmd+Click` / `F12` |
 | XML CRUD 语句的 `id` | Java Mapper 方法 | `-> JAVA` CodeLens / `Ctrl/Cmd+Click` / `F12` |
 | XML `<sql id="x">` | 所有 `<include>` 用法 | `-> Include` CodeLens / `Shift+F12` / `Ctrl/Cmd+Click` |
