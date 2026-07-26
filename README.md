@@ -29,7 +29,8 @@ CodeLens 需要开启 VSCode 的 `editor.codeLens` 设置，该设置默认开�
 | `select` | 对应 `<select id>` 定义 |
 | `resultType`、`parameterType`、`type`、`javaType`、`ofType` | Java 全限定类型声明 |
 | `property` | 当前 `resultMap`、`association` 或 `collection` 对应 Java 类型的字段 |
-| `test` | 当前 CRUD 语句对应 Mapper 方法的 Java 参数 |
+| `test` 表达式变量 | 当前 CRUD 语句对应 Mapper 方法的 Java 参数或参数对象字段 |
+| `#{...}` 变量 | Mapper 方法的 Java 参数或参数对象字段 |
 
 XML 扫描支持单双引号、等号两侧空格、任意属性顺序，以及属性值中的 `>`。注释、CDATA、处理指令和 DOCTYPE 中的伪标签不会参与跳转。
 
@@ -47,7 +48,7 @@ XML 扫描支持单双引号、等号两侧空格、任意属性顺序，以及�
 
 - 不处理 `@Select`、`@Insert` 等注解 SQL。
 - Java 类型跳转要求 XML 中使用全限定类名；`map`、`string`、项目自定义 typeAlias 等别名不会跳转。
-- `test` 表达式按 Java 源码参数名定位，暂不解析名称不同的 `@Param` 别名。
+- `test` 和 `#{...}` 支持 Java 参数名、`@Param` 别名及点分隔的对象字段路径。
 - Java 方法和类型定位优先使用 Java 语言服务的 DocumentSymbol；语言服务不可用时使用内置降级解析。
 - 跨文件 `<include>` 仅匹配带 namespace 前缀的 `refid="namespace.id"`；短 `refid="id"` 只在当前 XML 内匹配。
 

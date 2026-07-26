@@ -14,6 +14,11 @@ export interface XmlTag {
   attributes: Map<string, XmlAttribute>;
 }
 
+export interface XmlBindingPath {
+  segments: string[];
+  activeIndex: number;
+}
+
 function isNameStart(ch: string): boolean {
   return /[A-Za-z_:]/.test(ch);
 }
@@ -201,4 +206,52 @@ export function findTagById(
       names.has(tag.name) &&
       tag.attributes.get('id')?.value === id
   );
+}
+
+export function findDottedPathAtOffset(
+  text: string,
+  offset: number,
+  start = 0,
+  end = text.length
+): XmlBindingPath | undefined {
+  const boundedStart = Math.max(0, start);
+  const boundedEnd = Math.min(text.length, end);
+  const source = text.slice(boundedStart, boundedEnd);
+  const pathRe = /[A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*/g;
+  let pathMatch: RegExpExecArray | null;
+  while ((pathMatch = pathRe.exec(source)) !== null) {
+    const pathStart = boundedStart + pathMatch.index;
+    const identifiers = [...pathMatch[0].matchAll(/[A-Za-z_$][\w$]*/g)];
+    const activeIndex = identifiers.findIndex((identifier) => {
+      const identifierStart = pathStart + (identifier.index || 0);
+      return (
+        identifierStart <= offset &&
+        offset <= identifierStart + identifier[0].length
+      );
+    });
+    if (activeIndex >= 0) {
+      return {
+        segments: identifiers.map((identifier) => identifier[0]),
+        activeIndex,
+      };
+    }
+  }
+  return undefined;
+}
+
+export function findPlaceholderPathAtOffset(
+  text: string,
+  offset: number
+): XmlBindingPath | undefined {
+  const placeholderRe = /#\{([\s\S]*?)\}/g;
+  let match: RegExpExecArray | null;
+  while ((match = placeholderRe.exec(text)) !== null) {
+    const contentStart = match.index + 2;
+    const contentEnd = contentStart + match[1].length;
+    if (offset < contentStart || offset > contentEnd) continue;
+    const optionOffset = match[1].indexOf(',');
+    const pathEnd = optionOffset < 0 ? contentEnd : contentStart + optionOffset;
+    return findDottedPathAtOffset(text, offset, contentStart, pathEnd);
+  }
+  return undefined;
 }

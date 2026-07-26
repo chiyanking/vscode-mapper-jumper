@@ -1,7 +1,9 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const {
+  findDottedPathAtOffset,
   findOpenTagAtOffset,
+  findPlaceholderPathAtOffset,
   getOpenTagStack,
   scanXmlTags,
 } = require('../out/xmlScanner');
@@ -61,4 +63,39 @@ test('maintains the actual ancestor stack across closed associations', () => {
     'result',
   ]);
   assert.deepEqual(nameStack.map((tag) => tag.name), ['resultMap', 'result']);
+});
+
+test('finds the active segment in a dotted test expression', () => {
+  const text = `<if test="user.address.city != null">`;
+  assert.deepEqual(findDottedPathAtOffset(text, text.indexOf('address') + 2), {
+    segments: ['user', 'address', 'city'],
+    activeIndex: 1,
+  });
+});
+
+test('finds DTO properties inside chained OGNL method calls', () => {
+  const cases = [
+    `<if test="'2'.toString().equals(dto.deliveryType)">`,
+    `<when test="'05'.equals(dto.planType)">`,
+  ];
+  assert.deepEqual(
+    findDottedPathAtOffset(cases[0], cases[0].indexOf('deliveryType') + 2),
+    { segments: ['dto', 'deliveryType'], activeIndex: 1 }
+  );
+  assert.deepEqual(
+    findDottedPathAtOffset(cases[1], cases[1].indexOf('planType') + 2),
+    { segments: ['dto', 'planType'], activeIndex: 1 }
+  );
+});
+
+test('finds a binding path inside a placeholder and ignores options', () => {
+  const text = `where name = #{request.user.name, jdbcType=VARCHAR}`;
+  assert.deepEqual(findPlaceholderPathAtOffset(text, text.indexOf('name,') + 1), {
+    segments: ['request', 'user', 'name'],
+    activeIndex: 2,
+  });
+  assert.equal(
+    findPlaceholderPathAtOffset(text, text.indexOf('VARCHAR') + 1),
+    undefined
+  );
 });

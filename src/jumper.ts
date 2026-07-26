@@ -6,8 +6,11 @@ import {
 } from './javaScanner';
 import {
   XmlAttribute,
+  XmlBindingPath,
   XmlTag,
+  findDottedPathAtOffset,
   findOpenTagAtOffset,
+  findPlaceholderPathAtOffset,
   findTagById,
   getOpenTagStack,
   scanXmlTags,
@@ -376,14 +379,26 @@ function getJavaMethodNameByRegex(
 function getXmlAttributeAtCursor(
   doc: vscode.TextDocument,
   pos: vscode.Position
-): { tag: string; attr: string; value: string } | undefined {
+): {
+  tag: string;
+  attr: string;
+  value: string;
+  valueStart: number;
+  valueEnd: number;
+} | undefined {
   const text = doc.getText();
   const cursor = doc.offsetAt(pos);
   const tag = findOpenTagAtOffset(scanXmlTags(text), cursor);
   if (!tag) return undefined;
   for (const attr of tag.attributes.values()) {
     if (cursor >= attr.valueStart && cursor <= attr.valueEnd) {
-      return { tag: tag.name, attr: attr.name, value: attr.value };
+      return {
+        tag: tag.name,
+        attr: attr.name,
+        value: attr.value,
+        valueStart: attr.valueStart,
+        valueEnd: attr.valueEnd,
+      };
     }
   }
   return undefined;
@@ -504,6 +519,13 @@ async function resolveFromXml(
   doc: vscode.TextDocument,
   pos: vscode.Position
 ): Promise<vscode.Location[]> {
+  const text = doc.getText();
+  const cursor = doc.offsetAt(pos);
+  const placeholderPath = findPlaceholderPathAtOffset(text, cursor);
+  if (placeholderPath) {
+    return resolveMapperBindingRef(doc, pos, placeholderPath);
+  }
+
   const at = getXmlAttributeAtCursor(doc, pos);
   if (!at) return [];
   const { tag, attr, value } = at;
@@ -546,9 +568,15 @@ async function resolveFromXml(
   if (attr === 'property') {
     return resolvePropertyRef(doc, pos, value);
   }
-  // test -> mapper 方法参数(光标处标识符)
+  // test -> Mapper 方法参数或参数对象字段
   if (attr === 'test') {
-    return resolveTestRef(doc, pos);
+    const path = findDottedPathAtOffset(
+      text,
+      cursor,
+      at.valueStart,
+      at.valueEnd
+    );
+    return path ? resolveMapperBindingRef(doc, pos, path) : [];
   }
   return [];
 }
@@ -790,23 +818,71 @@ function findEnclosingStatementId(
     ?.attributes.get('id')?.value;
 }
 
-/** 在 Java 文档中定位字段声明 range(匹配 fieldName; 或 fieldName =) */
-function findJavaFieldRange(
+interface JavaFieldInfo {
+  range: vscode.Range;
+  type?: string;
+}
+
+interface JavaMethodParameter {
+  name: string;
+  type: string;
+  aliases: string[];
+  range: vscode.Range;
+}
+
+/** 在 Java 文档中定位字段声明及其类型 */
+function findJavaFieldInfo(
   doc: vscode.TextDocument,
   fieldName: string
-): vscode.Range | undefined {
-  const re = new RegExp('\\b' + escapeRegExp(fieldName) + '\\b\\s*[=;]');
+): JavaFieldInfo | undefined {
+  const re = new RegExp(
+    '([A-Za-z_$][\\w$.]*(?:\\s*<[^;=(){}]+>)?(?:\\s*\\[\\s*\\])*)' +
+      '\\s+(' +
+      escapeRegExp(fieldName) +
+      ')\\s*(?=[=;,)])'
+  );
   for (let i = 0; i < doc.lineCount; i++) {
     const text = doc.lineAt(i).text;
     const m = re.exec(text);
     if (m) {
-      return new vscode.Range(i, m.index, i, m.index + fieldName.length);
+      const nameStart = m.index + m[0].lastIndexOf(m[2]);
+      return {
+        range: new vscode.Range(
+          i,
+          nameStart,
+          i,
+          nameStart + fieldName.length
+        ),
+        type: m[1].trim(),
+      };
+    }
+  }
+  const fallback = new RegExp(
+    '\\b' + escapeRegExp(fieldName) + '\\b\\s*[=;]'
+  );
+  for (let i = 0; i < doc.lineCount; i++) {
+    const match = fallback.exec(doc.lineAt(i).text);
+    if (match) {
+      return {
+        range: new vscode.Range(
+          i,
+          match.index,
+          i,
+          match.index + fieldName.length
+        ),
+      };
     }
   }
   return undefined;
 }
 
-/** 在 Java 文档中定位方法 methodName 的参数 paramName 声明 range(排除 @Param("...") 里的同名值) */
+function findJavaFieldRange(
+  doc: vscode.TextDocument,
+  fieldName: string
+): vscode.Range | undefined {
+  return findJavaFieldInfo(doc, fieldName)?.range;
+}
+
 function findClosingParen(text: string, open: number): number {
   let depth = 0;
   let quote: string | undefined;
@@ -826,33 +902,118 @@ function findClosingParen(text: string, open: number): number {
   return -1;
 }
 
-async function findJavaMethodParamRange(
+function splitJavaParameterRanges(
+  text: string,
+  start: number,
+  end: number
+): { start: number; end: number }[] {
+  const ranges: { start: number; end: number }[] = [];
+  let segmentStart = start;
+  let angleDepth = 0;
+  let parenDepth = 0;
+  let bracketDepth = 0;
+  let quote: string | undefined;
+  for (let i = start; i < end; i++) {
+    const ch = text[i];
+    if (quote) {
+      if (ch === '\\') i++;
+      else if (ch === quote) quote = undefined;
+      continue;
+    }
+    if (ch === '"' || ch === "'") quote = ch;
+    else if (ch === '<') angleDepth++;
+    else if (ch === '>') angleDepth = Math.max(0, angleDepth - 1);
+    else if (ch === '(') parenDepth++;
+    else if (ch === ')') parenDepth = Math.max(0, parenDepth - 1);
+    else if (ch === '[') bracketDepth++;
+    else if (ch === ']') bracketDepth = Math.max(0, bracketDepth - 1);
+    else if (
+      ch === ',' &&
+      angleDepth === 0 &&
+      parenDepth === 0 &&
+      bracketDepth === 0
+    ) {
+      ranges.push({ start: segmentStart, end: i });
+      segmentStart = i + 1;
+    }
+  }
+  ranges.push({ start: segmentStart, end });
+  return ranges;
+}
+
+function maskJavaAnnotations(source: string): string {
+  const chars = source.split('');
+  for (let i = 0; i < chars.length; i++) {
+    if (chars[i] !== '@') continue;
+    let end = i + 1;
+    while (end < chars.length && /[\w$.]/.test(chars[end])) end++;
+    while (end < chars.length && /\s/.test(chars[end])) end++;
+    if (chars[end] === '(') {
+      let depth = 0;
+      let quote: string | undefined;
+      for (; end < chars.length; end++) {
+        const ch = chars[end];
+        if (quote) {
+          if (ch === '\\') end++;
+          else if (ch === quote) quote = undefined;
+        } else if (ch === '"' || ch === "'") {
+          quote = ch;
+        } else if (ch === '(') {
+          depth++;
+        } else if (ch === ')' && --depth === 0) {
+          end++;
+          break;
+        }
+      }
+    }
+    for (let j = i; j < end; j++) {
+      if (!/\s/.test(chars[j])) chars[j] = ' ';
+    }
+    i = end - 1;
+  }
+  return chars.join('');
+}
+
+async function findJavaMethodParameters(
   doc: vscode.TextDocument,
-  methodName: string,
-  paramName: string
-): Promise<vscode.Range | undefined> {
+  methodName: string
+): Promise<JavaMethodParameter[]> {
   const text = doc.getText();
   const methodRanges = await findJavaMethodRanges(doc, methodName);
+  const parameters: JavaMethodParameter[] = [];
   for (const methodRange of methodRanges) {
     const methodEnd = doc.offsetAt(methodRange.end);
     const open = text.indexOf('(', methodEnd);
     if (open < 0) continue;
     const close = findClosingParen(text, open);
     if (close < 0) continue;
-    const params = text.slice(open + 1, close);
-    const paramRe = new RegExp(
-      '(^|[\\s,])(' + escapeRegExp(paramName) + ')(?=\\s*[,)]|\\s*$)',
-      'm'
-    );
-    const match = paramRe.exec(params);
-    if (!match) continue;
-    const offset = open + 1 + match.index + match[1].length;
-    return new vscode.Range(
-      doc.positionAt(offset),
-      doc.positionAt(offset + paramName.length)
-    );
+    for (const range of splitJavaParameterRanges(text, open + 1, close)) {
+      const source = text.slice(range.start, range.end);
+      const aliases = [...source.matchAll(
+        /@(?:[\w$.]+\.)?Param\s*\(\s*(?:value\s*=\s*)?["']([^"']+)["']/g
+      )].map((match) => match[1]);
+      const masked = maskJavaAnnotations(source);
+      const nameMatch = /([A-Za-z_$][\w$]*)\s*(?:\[\s*\])?\s*$/.exec(masked);
+      if (!nameMatch) continue;
+      const name = nameMatch[1];
+      const nameOffset = range.start + nameMatch.index;
+      const type = masked
+        .slice(0, nameMatch.index)
+        .replace(/\b(?:final|volatile|transient)\b/g, ' ')
+        .trim();
+      if (!type) continue;
+      parameters.push({
+        name,
+        type,
+        aliases,
+        range: new vscode.Range(
+          doc.positionAt(nameOffset),
+          doc.positionAt(nameOffset + name.length)
+        ),
+      });
+    }
   }
-  return undefined;
+  return parameters;
 }
 
 async function resolvePropertyRef(
@@ -938,15 +1099,107 @@ async function resolveResultMapType(
   return tag ? resolveContainerType(targetDoc, tag, seen) : undefined;
 }
 
-async function resolveTestRef(
+function extractReferencedJavaType(type: string): string | undefined {
+  const cleaned = type
+    .replace(/\.\.\./g, '')
+    .replace(/\[\s*\]/g, '')
+    .replace(/\?\s*(?:extends|super)?/g, ' ')
+    .trim();
+  const genericStart = cleaned.indexOf('<');
+  const source =
+    genericStart >= 0
+      ? cleaned.slice(genericStart + 1, cleaned.lastIndexOf('>'))
+      : cleaned;
+  const names = source.match(/[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*/g);
+  return names?.[names.length - 1];
+}
+
+const NON_OBJECT_JAVA_TYPES = new Set([
+  'boolean',
+  'byte',
+  'char',
+  'double',
+  'float',
+  'int',
+  'long',
+  'short',
+  'void',
+]);
+
+async function openJavaTypeDocument(
+  ownerDoc: vscode.TextDocument,
+  type: string
+): Promise<vscode.TextDocument | undefined> {
+  const typeName = extractReferencedJavaType(type);
+  if (!typeName || NON_OBJECT_JAVA_TYPES.has(typeName)) return undefined;
+  const simpleName = typeName.slice(typeName.lastIndexOf('.') + 1);
+  if (path.basename(ownerDoc.fileName, '.java') === simpleName) return ownerDoc;
+
+  const source = ownerDoc.getText();
+  const candidates: string[] = [];
+  if (typeName.includes('.')) candidates.push(typeName);
+  const importMatch = source.match(
+    new RegExp(
+      '^import\\s+(?:static\\s+)?([\\w.]+\\.' +
+        escapeRegExp(simpleName) +
+        ')\\s*;',
+      'm'
+    )
+  );
+  if (importMatch) candidates.push(importMatch[1]);
+  const packageMatch = source.match(/^package\s+([\w.]+)\s*;/m);
+  if (packageMatch) candidates.push(packageMatch[1] + '.' + simpleName);
+  candidates.push(simpleName);
+
+  for (const candidate of [...new Set(candidates)]) {
+    const uri = await locateJava(ownerDoc.uri.fsPath, candidate);
+    if (uri) return vscode.workspace.openTextDocument(uri);
+  }
+  return undefined;
+}
+
+async function resolveJavaFieldPath(
+  mapperDoc: vscode.TextDocument,
+  parameter: JavaMethodParameter,
+  binding: XmlBindingPath,
+  firstFieldIndex: number
+): Promise<vscode.Location | undefined> {
+  let ownerDoc = await openJavaTypeDocument(mapperDoc, parameter.type);
+  if (!ownerDoc) return undefined;
+  for (let i = firstFieldIndex; i <= binding.activeIndex; i++) {
+    const field = findJavaFieldInfo(ownerDoc, binding.segments[i]);
+    if (!field) return undefined;
+    if (i === binding.activeIndex) {
+      return new vscode.Location(ownerDoc.uri, field.range);
+    }
+    if (!field.type) return undefined;
+    const nextOwner = await openJavaTypeDocument(ownerDoc, field.type);
+    if (!nextOwner) return undefined;
+    ownerDoc = nextOwner;
+  }
+  return undefined;
+}
+
+function uniqueLocations(locations: vscode.Location[]): vscode.Location[] {
+  const seen = new Set<string>();
+  return locations.filter((location) => {
+    const key =
+      location.uri.toString() +
+      ':' +
+      location.range.start.line +
+      ':' +
+      location.range.start.character;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+async function resolveMapperBindingRef(
   doc: vscode.TextDocument,
-  pos: vscode.Position
+  pos: vscode.Position,
+  binding: XmlBindingPath
 ): Promise<vscode.Location[]> {
-  // 光标处标识符(参数名)
-  const wordRange = doc.getWordRangeAtPosition(pos, /[A-Za-z_$][\w$]*/);
-  if (!wordRange) return [];
-  const word = doc.getText(wordRange);
-  // 向上找所在语句的 id(mapper 方法名)
   const methodId = findEnclosingStatementId(doc, pos);
   if (!methodId) return [];
   const namespace = getMapperNamespace(doc.getText());
@@ -954,9 +1207,43 @@ async function resolveTestRef(
   const javaUri = await locateJavaByXml(doc.uri.fsPath, namespace);
   if (!javaUri) return [];
   const javaDoc = await vscode.workspace.openTextDocument(javaUri);
-  const range = await findJavaMethodParamRange(javaDoc, methodId, word);
-  if (!range) return [];
-  return [new vscode.Location(javaUri, range)];
+  const parameters = await findJavaMethodParameters(javaDoc, methodId);
+  const rootName = binding.segments[0];
+  const explicitParameters = parameters.filter(
+    (parameter) =>
+      parameter.name === rootName || parameter.aliases.includes(rootName)
+  );
+
+  if (explicitParameters.length > 0) {
+    if (binding.activeIndex === 0) {
+      return uniqueLocations(
+        explicitParameters.map(
+          (parameter) => new vscode.Location(javaUri, parameter.range)
+        )
+      );
+    }
+    const fields = await Promise.all(
+      explicitParameters.map((parameter) =>
+        resolveJavaFieldPath(javaDoc, parameter, binding, 1)
+      )
+    );
+    return uniqueLocations(
+      fields.filter(
+        (location): location is vscode.Location => Boolean(location)
+      )
+    );
+  }
+
+  // MyBatis 单对象参数可直接使用 #{field} / test="field != null";
+  // 多个对象都命中时返回全部候选，交给 VSCode 选择。
+  const fields = await Promise.all(
+    parameters.map((parameter) =>
+      resolveJavaFieldPath(javaDoc, parameter, binding, 0)
+    )
+  );
+  return uniqueLocations(
+    fields.filter((location): location is vscode.Location => Boolean(location))
+  );
 }
 
 async function resolveFromJava(
